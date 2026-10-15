@@ -17,10 +17,10 @@ try:  # orjson encodes large request bodies several times faster; optional
     def _dumps(obj: Any) -> bytes:
         return orjson.dumps(obj, option=orjson.OPT_SERIALIZE_NUMPY)
 except ImportError:  # pragma: no cover
-    import json as _json
+    import json as jsonlib
 
     def _dumps(obj: Any) -> bytes:
-        return _json.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
+        return jsonlib.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
 
 
 from ._errors import APIConnectionError, APITimeoutError, ConfigurationError, error_from_response

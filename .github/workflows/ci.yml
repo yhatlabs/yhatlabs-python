@@ -15,6 +15,14 @@ jobs:
       - run: uv venv -p ${{ matrix.python }} && uv pip install -e ".[dev]"
       - run: uv run --no-sync ruff check src tests examples && uv run --no-sync ruff format --check src tests examples
       - run: uv run --no-sync pytest -q
+  bare-install:
+    # the package as `pip install yhatlabs` gives it: no optional extras (no orjson, pyarrow, polars, matplotlib)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv venv -p 3.12 && uv pip install -e . pytest pytest-asyncio
+      - run: uv run --no-sync pytest -q -m "not live"   # tests needing an extra skip themselves
   changelog:
     if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'no-changelog')
     runs-on: ubuntu-latest

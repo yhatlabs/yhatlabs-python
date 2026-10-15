@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+from pandas.util import hash_pandas_object
 
 from ._client import DEFAULT_TAB_MODEL, Client
 from ._errors import DataError, UnsupportedError
@@ -111,7 +112,7 @@ class _ChakraTab(BaseEstimator):
         if not hasattr(self, "fit_"):
             raise DataError(f"This {type(self).__name__} is not fitted yet; call fit(X, y) first.")
         X = _as_frame(X, self._columns).reset_index(drop=True)
-        key = (X.shape, int(pd.util.hash_pandas_object(X, index=False).sum()), tuple(quantiles or ()))
+        key = (X.shape, int(hash_pandas_object(X, index=False).sum()), tuple(quantiles or ()))
         last = getattr(self, "_last", None)
         if last is not None and last[0] == key:
             return last[1]
