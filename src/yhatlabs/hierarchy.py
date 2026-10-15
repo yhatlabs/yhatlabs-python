@@ -35,6 +35,11 @@ def aggregate(
 ) -> Tuple[pd.DataFrame, Dict[str, List[str]]]:
     """Every level's series from the bottom rows. levels: from the top down, each a list of the columns that define it; the last
     level is the bottom (one series per distinct combination). -> (long table with a unique_id column, {parent id: [child ids]}).
+
+    Args:
+        data: The bottom-level rows.
+        levels: From the top down, the columns that define each level; the last is the bottom.
+        total: Name of the series summing everything, or None for no total.
     """
     df = _pandas(data).copy()
     levels = [list(lv) for lv in levels]
@@ -91,6 +96,10 @@ def reconcile(fc: Any, tree: Dict[str, List[str]]) -> Any:
     """The forecast with every value column (median, mean, each quantile) adjusted so parents equal the sum of their children.
     Quantiles are reconciled column by column: exact for the median and mean, an approximation for the interval edges (sums of
     quantiles are not quantiles of sums); use sample paths when the uncertainty of an aggregate matters.
+
+    Args:
+        fc: A forecast of every series in the tree.
+        tree: {parent id: [child ids]}, as aggregate() returns it.
     """
     df = fc.df
     id_col, time_col = df.columns[0], df.columns[1]

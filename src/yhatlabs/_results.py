@@ -68,6 +68,9 @@ class ForecastResult:
     def sample_paths(self, uid: Any = None) -> Any:
         """Sample paths of one series as an array [samples, h] (the first series by default). Sums, maxima or counts over the
         horizon get honest uncertainty from these: e.g. np.quantile(fc.sample_paths("a").sum(axis=1), [0.05, 0.95]).
+
+        Args:
+            uid: The series. Default: the first one.
         """
         from ._errors import DataError
 
@@ -138,6 +141,9 @@ class ForecastResult:
     def intervals(self, levels: Union[float, Sequence[float]] = 80) -> pd.DataFrame:
         """Central prediction intervals by width in percent: `lower_80` / `upper_80` columns (from q10 / q90), next to the
         median. The quantiles must be in the forecast: request them with level=[80] (or quantiles=) when forecasting.
+
+        Args:
+            levels: Interval width in percent, or a list of widths.
         """
         from ._errors import DataError
         from ._forecast import qname
@@ -158,6 +164,10 @@ class ForecastResult:
         """Probability of exceeding (above=) or staying under (below=) a limit at every forecast step, read from the forecast's
         quantiles. The limit is one number or one per row. More levels give a finer answer: forecast with quantiles="all".
         Beyond the outermost quantile the tail is extrapolated, so probabilities under 10% or over 90% are estimates.
+
+        Args:
+            above: A limit (one number or one per row): the chance of exceeding it.
+            below: A limit: the chance of staying under it.
         """
         from ._forecast import qname
 
@@ -168,6 +178,9 @@ class ForecastResult:
     def to_wide(self, value: str = "median") -> pd.DataFrame:
         """One row per timestamp, one column per series (per series and target when there are several targets): the shape a
         spreadsheet or a plotting tool expects. value: which column to spread (median, mean, q10, ...).
+
+        Args:
+            value: The column to spread: median, mean, q10, ...
         """
         from ._errors import DataError
 
@@ -247,6 +260,10 @@ class PredictionResult:
         """Regression: probability that each row's value exceeds (above=) or stays under (below=) a limit (one number or one
         per row), read from the prediction intervals. Predict with several quantiles, e.g. quantiles=[0.05, 0.25, 0.5, 0.75, 0.95].
         Classification already returns probabilities (result.probabilities).
+
+        Args:
+            above: A limit (one number or one per row).
+            below: A limit.
         """
         from ._errors import DataError
         from ._forecast import qname

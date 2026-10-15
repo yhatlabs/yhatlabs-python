@@ -154,6 +154,11 @@ class FittedModel:
         """Score rows with this fit. quantiles: regression only, any levels in (0, 1), e.g. [0.05, 0.5, 0.95].
         set_coverage: classification only, e.g. 0.9: res.prediction_sets holds, per row, the classes that together contain the
         true one for 90% of new rows like the training ones (one class when the model is sure, several when it is not).
+
+        Args:
+            test: The rows to score, with the training table's feature columns.
+            quantiles: Regression: interval levels in (0, 1).
+            set_coverage: Classification: prediction sets that hold the true class this often, e.g. 0.9.
         """
         c = self._c()
         te, q, warns = self._test(test, quantiles, c.limits)
@@ -183,6 +188,12 @@ class FittedModel:
         """Permutation importance per input column: how much the score drops when the column is shuffled (higher = more important).
         data: labeled rows the model has not seen (with the target column); best for medium/full fits. Without it, a fast fit uses its
         own validation split and a bagged fit falls back to training rows (in-sample, so importance is optimistic; see .attrs['source']).
+
+        Args:
+            data: Labeled rows the model has not seen (target included); the most honest numbers.
+            subsample_size: Rows used per shuffle.
+            num_shuffle_sets: Repeats per column; more gives a tighter stddev.
+            time_limit: Seconds for the call.
         """
         c = self._c()
         return _importance(
@@ -201,6 +212,13 @@ class FittedModel:
         per class in `output`), `low` / `high` the 10th and 90th percentile across rows, which shows whether the effect is the
         same everywhere. grid: a number of points (quantiles of the column; categories by frequency) or the values themselves.
         Cost: rows x grid predicted rows (200 x 20 = 4,000 by default). Plot it with yhatlabs.plots.effect().
+
+        Args:
+            col: The column to vary.
+            grid: Number of values (quantiles of the column, or its most frequent categories), or the values themselves.
+            data: Rows to vary. Default: the training sample kept on the handle.
+            rows: How many rows to vary.
+            seed: Seed for picking the rows.
         """
         stacked, values = _effect_rows(self, col, grid, data, rows, seed)
         return _effect_frame(self.predict(stacked), col, values, len(stacked) // len(values))

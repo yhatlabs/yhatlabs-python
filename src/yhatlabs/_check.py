@@ -102,6 +102,12 @@ def check(
 
     >>> import yhatlabs
     >>> yhatlabs.check(df, h=24)            # DataCheck(timeseries: 12 series, 1 warning, 2 notes)
+
+    Args:
+        data: A time-series table, or a tabular table with target=.
+        h: The horizon you plan to forecast (checks the history is long enough).
+        target: For tables: the target column(s); turns on the tabular checks.
+        limits: Request caps to check against. Default: the published ones.
     """
     df = _frame(data)
     cols = list(df.columns)

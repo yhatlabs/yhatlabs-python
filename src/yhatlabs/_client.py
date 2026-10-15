@@ -352,6 +352,17 @@ class Client(_Base):
         limits: Optional[Limits] = None,
         http_client: Optional[httpx.Client] = None,
     ):
+        """
+
+        Args:
+            api_key: Your key. Default: the YHAT_API_KEY environment variable.
+            base_url: The API's address. Default: YHAT_BASE_URL, else https://api.yhatlabs.com.
+            timeout: Seconds per request.
+            max_retries: Retries of timeouts, connection errors and 408 / 409 / 429 / 5xx replies, with backoff.
+            max_concurrency: Requests sent in parallel when a large input is split.
+            limits: Request caps to split batches by; read from GET /v1/limits on first use when left out.
+            http_client: An httpx.Client to send requests with (proxies, custom transports).
+        """
         super().__init__(SyncTransport(api_key, base_url, timeout, max_retries, http_client), limits, max_concurrency)
 
     def __enter__(self) -> Client:
@@ -455,6 +466,14 @@ class Client(_Base):
         columns; static: per-series constants (region, store size). on_error="warn" returns the series that succeeded when some
         batches fail (failures in result.errors). calendar=True adds hour / weekday / month / weekend as known covariates, with
         no future= needed for them ({"holidays": "US"} adds a holiday flag).
+
+        Args:
+            mean: Add a mean column next to the median, computed from the quantiles (for forecasts summed later).
+            on_error: "raise" (default): the first failed batch raises. "warn": return the series that succeeded;
+                failures in result.errors.
+            samples: Return this many sample paths per series (1 to 1000) in result.samples.
+            seed: Random seed for the sample paths.
+            history: Also return the model's forecasts of the windows just before the forecast (result.history).
         """
         t0 = time.monotonic()
         data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq, target_col)
@@ -511,6 +530,11 @@ class Client(_Base):
     ) -> pd.DataFrame:
         """What-if: one forecast per scenario of the known covariates (e.g. {"base": future, "price +10%": future_up}), stacked
         with a `scenario` column so the outcomes compare side by side.
+
+        Args:
+            futures: {scenario name: future table of the known covariates}, one table per scenario.
+            known: The covariate columns the scenarios set.
+            kw: Any other forecast() option (id_col, time_col, freq, past, static, ...).
         """
         if not futures:
             raise DataError("futures must map scenario names to future DataFrames.")
@@ -546,6 +570,15 @@ class Client(_Base):
         scored against the actuals. Known covariates are read from `data` itself. compare: your own forecasts to score alongside,
         {"current": df} with id, time and quantile columns (median, q10, ...) or a point column 'forecast'. The summary gives
         skill against the first baseline (1 - geometric-mean error ratio; > 0 beats it).
+
+        Args:
+            windows: How many backtest windows, ending at the end of each series.
+            step: Steps between window cutoffs. Default: h (windows do not overlap).
+            models: The models to score.
+            baselines: Simple forecasts to score against: seasonal_naive, naive, mean.
+            metrics: Scores to compute per window: mase, sql, wql, mae, rmse, coverage@<level>.
+            compare: Your own forecasts to score on the same windows: {name: table with the time (and id) column and
+                quantile columns, or a forecast column}.
         """
         data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq, target_col)
         known = list(known or [])
@@ -599,6 +632,12 @@ class Client(_Base):
     ) -> pd.DataFrame:
         """Scores the last windows x h points of each series against forecasts made from the history before each window.
         score = (actual - median) / the forecast's own spread; |score| > threshold marks `anomaly`. h defaults to one season.
+
+        Args:
+            h: Points scored per window. Default: max(season, 8).
+            windows: How many windows back from the end are scored.
+            threshold: Score above which a point is flagged (its distance from the forecast, in units of the forecast's
+                spread).
         """
         data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq, target_col)
         known = list(known or [])
@@ -638,6 +677,9 @@ class Client(_Base):
     ) -> pd.DataFrame:
         """Fills missing values (and missing timestamps) inside each series with the median forecast from the history before the
         gap. Returns the regular grid: id, time, targets, and a `<target>_filled` flag per target.
+
+        Args:
+            max_gap: Longest run of missing points to fill. Default: the API's maximum horizon.
         """
         known = list(known or [])
         prep = _prep(
@@ -692,6 +734,11 @@ class Client(_Base):
         (default), mae, r2 for regression. It does not change the decision rule. quantiles: regression prediction intervals,
         e.g. [0.05, 0.5, 0.95] (split-conformal on out-of-sample errors). time_limit: seconds for the whole call. seed: the
         server uses 0 when omitted, so results are already reproducible.
+
+        Args:
+            quantiles: Regression: interval levels in (0, 1), e.g. [0.05, 0.5, 0.95], up to 32.
+            time_col: A column of times: validation folds are contiguous periods of it, so intervals hold for later
+                periods. It stays a feature.
         """
         tr, te, pt, q, warns, extra = _tabular.prepare(
             train,
@@ -766,6 +813,14 @@ class Client(_Base):
         """Credits a tabular call will cost, before making it: a fit on `train` (rows x feature columns, times the preset's
         folds) plus predicting `test`. Pass tables, or the counts (train_rows, features, predict_rows). Uses the rates the API
         publishes, so it stays right when they change. -> {"fit", "predict", "total", "unit"}
+
+        Args:
+            train: The training table (or pass train_rows and features).
+            target: The target column, left out of the feature count.
+            test: The rows to predict (or pass predict_rows).
+            train_rows: Training rows, when no table is passed.
+            features: Feature columns, when no table is passed.
+            predict_rows: Rows to predict, when no table is passed.
         """
         if train is not None:
             df = _tabular._frame(_pandas(train), "train")
@@ -822,6 +877,13 @@ class Client(_Base):
         Classification: accuracy, log loss, Brier score, AUC, calibration error, and a reliability table. Regression: MAE,
         RMSE, R2 and, with intervals (default quantiles 0.05 to 0.95), CRPS, coverage per interval and a PIT histogram.
         Cost: one fit-and-predict call per fold; the rows predicted add up to the table's size.
+
+        Args:
+            data: The whole table, target included; every row is predicted once by a fit that did not see it.
+            cv: Number of folds, at least 2.
+            groups: A column (or one value per row) whose rows stay in the same fold.
+            time_col: Time-ordered folds instead: each fold trains only on rows before its block.
+            quantiles: Regression interval levels to score. Default: 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95.
         """
         df = _tabular._frame(_pandas(data), "data")
         if target not in df.columns:
@@ -881,6 +943,13 @@ class Client(_Base):
         predictions report out_of_range and novelty; it stays on your machine (and in .save() records). False drops it.
         target=[...] fits each target on the features alone (the other targets left out) and returns a FitGroup that predicts,
         explains and deletes them together; task= may then be a dict per target. One fit's quota per target.
+
+        Args:
+            target: The column to predict, or a list of columns: one fit per target, returned as a FitGroup.
+            ttl_hours: How long the fit is kept, at most 168. Default: 24.
+            profile: Keep a summary of the training table on the handle for out_of_range and novelty (stays on your
+                machine).
+            time_col: A column of times: validation folds are contiguous periods of it. It stays a feature.
         """
         if not isinstance(target, str):
             targets = _targets(target, train)
@@ -959,6 +1028,10 @@ class Client(_Base):
     ) -> pd.DataFrame:
         """Fills missing cells of a table: for each column with gaps, the model learns it from the other columns on the rows
         where it is present and predicts the rest (one call per column). The result's .attrs['filled'] marks what was filled.
+
+        Args:
+            df: The table with missing values.
+            columns: Which columns to fill. Default: every column with missing values.
         """
         out = df.copy()
         filled = pd.DataFrame(False, index=df.index, columns=df.columns)
