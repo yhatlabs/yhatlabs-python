@@ -152,3 +152,44 @@ def test_holidays_missing_gives_clear_error(monkeypatch):
     )
     with pytest.raises(ConfigurationError, match="pip install holidays"):
         add_calendar(pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=3, freq="D")}), holidays="US")
+
+
+def test_calendar_with_custom_column_names(client, api):
+    df = pd.DataFrame({"Date": pd.date_range("2026-01-01", periods=60, freq="D"), "Temp": np.arange(60.0)})
+    fc = client.forecast(df, h=5, time_col="Date", target_col="Temp", calendar=["dayofweek", "month"])
+    s = api.requests[-1][2]["series"][0]
+    assert set(s["known_covariates"]) == {"dayofweek", "month"} and len(s["known_covariates"]["month"]) == 65
+    assert list(fc.df.columns)[:2] == ["unique_id", "Date"]
+    client.evaluate(df, h=5, windows=1, time_col="Date", target_col="Temp", calendar=True)
+
+
+def test_compare_single_series_without_id(client):
+    df = pd.DataFrame({"Date": pd.date_range("2026-01-01", periods=60, freq="D"), "Temp": np.arange(60.0)})
+    mine = df.tail(10)[["Date"]].assign(forecast=df["Temp"].tail(10).to_numpy() + 1)
+    ev = client.evaluate(df, h=5, windows=2, time_col="Date", target_col="Temp", compare={"current": mine})
+    assert np.isclose(ev.scores[ev.scores.model == "current"].mae, 1.0).all()
+
+
+def test_cli_warnings_are_one_line(api, tmp_path, monkeypatch):
+    import httpx
+
+    import yhatlabs._transport as t
+    from yhatlabs._cli import main
+
+    orig = t.SyncTransport.__init__
+    monkeypatch.setattr(
+        t.SyncTransport,
+        "__init__",
+        lambda self, k, b, timeout, mr, hc: orig(
+            self, "test-key", "https://fake.test", timeout, mr, httpx.Client(transport=httpx.MockTransport(api))
+        ),
+    )
+    df = pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=60, freq="D"), "y": np.arange(60.0)}).drop(index=[5])
+    src = tmp_path / "d.csv"
+    df.to_csv(src, index=False)
+    import warnings
+
+    monkeypatch.setattr(warnings, "formatwarning", warnings.formatwarning)  # restored after the test
+    assert main(["forecast", str(src), "--h", "3"]) == 0
+    line = warnings.formatwarning("Filled 1 missing timestamps", UserWarning, "x.py", 1)
+    assert line == "yhatlabs: warning: Filled 1 missing timestamps\n"

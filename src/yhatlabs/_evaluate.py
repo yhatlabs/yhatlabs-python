@@ -296,6 +296,10 @@ def run(
     for name, f in (compare or {}).items():
         if prep.target_cols[1:]:
             raise DataError("compare= supports single-target series.")
+        if prep.id_col not in f.columns:
+            if len(prep.items) != 1:
+                raise DataError(f"compare[{name!r}] needs the id column {prep.id_col!r} to match forecasts to series.")
+            f = f.assign(**{prep.id_col: prep.items[0].uid})  # one series: the id is implied
         table, clv = _compare_quantiles(f, prep.id_col, prep.time_col)
         used = 0
         for it, mi in zip(items, meta):

@@ -57,6 +57,9 @@ def _cols(p: argparse.ArgumentParser) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    import warnings
+
+    warnings.formatwarning = lambda message, *_a, **_k: f"yhatlabs: warning: {message}\n"
     ap = argparse.ArgumentParser(
         prog="yhatlabs", description="YHat Labs prediction API from the command line (key: YHAT_API_KEY)."
     )

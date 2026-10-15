@@ -164,6 +164,7 @@ def _with_calendar(
     id_col: Optional[str],
     time_col: Optional[str],
     freq: Optional[str],
+    target_col: Target = None,
 ):
     """calendar=True (or a list of features, or {"features": [...], "holidays": "US", "subdiv": "TX"}): adds calendar columns as
     known covariates, to the history and, when forecasting, to the future (built here when not given; dates are always known).
@@ -176,13 +177,14 @@ def _with_calendar(
     opts = calendar if isinstance(calendar, dict) else {}
     feats = list(opts.get("features") or (calendar if isinstance(calendar, (list, tuple)) else CALENDAR))
     hol = {"holidays": opts.get("holidays"), "subdiv": opts.get("subdiv")}
-    data = add_calendar(_pandas(data), feats, time_col=time_col, **hol)
+    data = _pandas(data)
+    if h is not None:  # the future frame first, from the data as given (before calendar columns are added to it)
+        if future is None:
+            tc = target_col if isinstance(target_col, str) else (list(target_col)[0] if target_col else None)
+            future = make_future(data, h, id_col=id_col, time_col=time_col, target_col=tc, freq=freq)
+        future = add_calendar(_pandas(future), feats, time_col=time_col, **hol)
+    data = add_calendar(data, feats, time_col=time_col, **hol)
     names = feats + (["is_holiday"] if hol["holidays"] else [])
-    if h is not None:
-        future = (
-            _pandas(future) if future is not None else make_future(data, h, id_col=id_col, time_col=time_col, freq=freq)
-        )
-        future = add_calendar(future, feats, time_col=time_col, **hol)
     return data, future, list(known or []) + [n for n in names if n not in (known or [])]
 
 
@@ -374,7 +376,7 @@ class Client(_Base):
         no future= needed for them ({"holidays": "US"} adds a holiday flag).
         """
         t0 = time.monotonic()
-        data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq)
+        data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq, target_col)
         quantiles = _levels(quantiles, level)
         resolve_quantiles(quantiles, ASSUMED_NATIVE)
         prep = _prep(
@@ -463,7 +465,7 @@ class Client(_Base):
         {"current": df} with id, time and quantile columns (median, q10, ...) or a point column 'forecast'. The summary gives
         skill against the first baseline (1 - geometric-mean error ratio; > 0 beats it).
         """
-        data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq)
+        data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq, target_col)
         known = list(known or [])
         prep = _prep(
             data,
@@ -516,7 +518,7 @@ class Client(_Base):
         """Scores the last windows x h points of each series against forecasts made from the history before each window.
         score = (actual - median) / the forecast's own spread; |score| > threshold marks `anomaly`. h defaults to one season.
         """
-        data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq)
+        data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq, target_col)
         known = list(known or [])
         prep = _prep(
             data,
@@ -800,7 +802,7 @@ class AsyncClient(_Base):
         calendar: Calendar = None,
     ) -> ForecastResult:
         t0 = time.monotonic()
-        data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq)
+        data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq, target_col)
         quantiles = _levels(quantiles, level)
         resolve_quantiles(quantiles, ASSUMED_NATIVE)
         prep = _prep(
@@ -860,7 +862,7 @@ class AsyncClient(_Base):
         static: Cols = None,
         calendar: Calendar = None,
     ) -> EvaluationResult:
-        data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq)
+        data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq, target_col)
         known = list(known or [])
         prep = _prep(
             data,

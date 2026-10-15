@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: `calendar=` failed when the time or target column had a custom name (for example `Date` and `Temp`).
+- Fixed: `evaluate(compare=...)` on a single series failed when the compared forecasts had no id column.
+- The CLI prints warnings as one clean line (`yhatlabs: warning: ...`) instead of Python's warning format.
+
 ## 0.1.1 (2026-10-15)
 
 - Fixed: requests failed without the optional `orjson` package (a plain `pip install yhatlabs`). The standard-library JSON
