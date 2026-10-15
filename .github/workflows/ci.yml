@@ -1,0 +1,29 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv venv -p ${{ matrix.python }} && uv pip install -e ".[dev]"
+      - run: uv run --no-sync ruff check src tests examples && uv run --no-sync ruff format --check src tests examples
+      - run: uv run --no-sync pytest -q
+  changelog:
+    if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'no-changelog')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with: { fetch-depth: 0 }
+      - name: CHANGELOG.md updated when src/ changes
+        run: |
+          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          if echo "$changed" | grep -q '^src/' && ! echo "$changed" | grep -q '^CHANGELOG.md$'; then
+            echo "src/ changed but CHANGELOG.md did not; add a line under Unreleased or label the PR no-changelog."; exit 1
+          fi

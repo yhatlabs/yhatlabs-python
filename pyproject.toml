@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "yhatlabs"
+dynamic = ["version"]
+description = "The official Python library for the YHat Labs time-series and tabular foundation models."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+authors = [{ name = "YHat Labs", email = "founders@yhatlabs.com" }]
+keywords = ["forecasting", "time series", "tabular", "foundation models", "prediction", "API"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
+]
+dependencies = ["httpx>=0.24", "numpy>=1.22", "pandas>=1.5"]
+
+[project.optional-dependencies]
+sklearn = ["scikit-learn>=1.2"]
+parquet = ["pyarrow>=12"]
+plot = ["matplotlib>=3.5"]
+fast = ["orjson>=3.9", "pyarrow>=12"]
+all = ["scikit-learn>=1.2", "pyarrow>=12", "matplotlib>=3.5", "orjson>=3.9", "holidays>=0.40", "polars>=0.20"]
+dev = ["pytest>=7", "pytest-asyncio>=0.21", "ruff>=0.5", "scikit-learn>=1.2", "pyarrow>=12", "matplotlib>=3.5", "orjson>=3.9", "holidays>=0.40", "polars>=0.20"]
+
+[project.scripts]
+yhatlabs = "yhatlabs._cli:main"
+yhat = "yhatlabs._cli:main"
+
+[project.urls]
+Homepage = "https://yhatlabs.com/models"
+Documentation = "https://yhatlabs.com/models"
+Repository = "https://github.com/yhatlabs/yhatlabs-python"
+Changelog = "https://github.com/yhatlabs/yhatlabs-python/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/yhatlabs/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yhatlabs"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "D"]
+# D1xx (missing docstrings) off: public entry points carry docstrings, internals only where the why is not obvious
+ignore = ["E501", "UP007", "UP006", "UP035", "UP045", "D100", "D101", "D102", "D103", "D104", "D105", "D107", "D205", "D212", "D415", "D400"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D"]
+"examples/*" = ["D"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["live: calls the real API (needs YHAT_API_KEY)"]
