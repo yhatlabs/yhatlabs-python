@@ -241,12 +241,15 @@ class _Base:
     @property
     def limits(self) -> Limits:
         if self._limits is None:
-            self._limits = self._fetch_limits()
-        return self._limits
+            self.limits = self._fetch_limits()
+        return self._limits  # type: ignore[return-value]
 
     @limits.setter
     def limits(self, value: Limits) -> None:
         self._limits = value
+        self._t.gzip = value.supports(
+            "gzip_requests"
+        )  # bodies over GZIP_MIN_BYTES go compressed once the API takes them
 
     def _fetch_limits(self) -> Limits:
         return Limits()

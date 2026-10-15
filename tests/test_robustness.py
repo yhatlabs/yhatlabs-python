@@ -100,3 +100,21 @@ def test_capabilities_read_from_limits():
     lim = Limits.from_api({"forecast": {"max_columns": 64}, "capabilities": {"gzip_requests": True}})
     assert lim.max_columns == 64 and lim.supports("gzip_requests") and not lim.supports("samples")
     assert not Limits.from_api({}).supports("gzip_requests")
+
+
+def test_large_bodies_gzip_only_when_the_api_says_so(client, api):
+    import gzip
+
+    from yhatlabs._transport import _prepare
+
+    big = {"x": list(range(300_000))}
+    body, h = _prepare("POST", big, {}, gzip=False)
+    assert "Content-Encoding" not in h
+    body, h = _prepare("POST", big, {}, gzip=True)
+    assert h["Content-Encoding"] == "gzip" and len(gzip.decompress(body)) > len(body) * 3
+    small, h = _prepare("POST", {"x": 1}, {}, gzip=True)
+    assert "Content-Encoding" not in h
+    client.limits = Limits(capabilities={"gzip_requests": True})
+    assert client._t.gzip
+    client.limits = Limits()
+    assert not client._t.gzip

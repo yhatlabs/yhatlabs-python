@@ -18,6 +18,7 @@
 - Every POST carries an `Idempotency-Key` header that stays the same across its retries, so the API can recognise a retry.
 - `Limits` has `max_columns` and `capabilities`, read from `/v1/limits`. `limits.supports(name)` tells whether the API has
   switched a feature on.
+- Request bodies over 1 MB are sent gzip-compressed once the API lists the `gzip_requests` capability.
 - Forecasts:
   - `forecast(..., mean=True)` adds a `mean` column, computed from the quantiles (listed in `derived`). Use it when forecasts
     are summed later; the median stays the point forecast.

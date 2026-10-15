@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip as gzip_lib
 import logging
 import os
 import random
@@ -42,13 +43,21 @@ if os.environ.get(
 _LABELS = {"/v1/forecast": "forecasting", "/v1/tabular/predict": "fitting and predicting", "/v1/fits": "fitting"}
 
 
-def _prepare(method: str, json: Any, headers: dict) -> tuple:
+GZIP_MIN_BYTES = 1024 * 1024
+
+
+def _prepare(method: str, json: Any, headers: dict, gzip: bool = False) -> tuple:
     """The body is encoded once, and a POST carries one Idempotency-Key across all its retries, so a retry after a
-    timeout can be recognised by the API as the same call (no second fit, no second charge).
+    timeout can be recognised by the API as the same call (no second fit, no second charge). With gzip (the API's
+    gzip_requests capability), bodies over GZIP_MIN_BYTES are compressed: JSON numbers shrink several times.
     """
     if method == "POST":
         headers = {**headers, "Idempotency-Key": uuid.uuid4().hex}
-    return (None if json is None else _dumps(json)), headers
+    body = None if json is None else _dumps(json)
+    if gzip and body is not None and len(body) > GZIP_MIN_BYTES:
+        body = gzip_lib.compress(body, compresslevel=5)
+        headers = {**headers, "Content-Encoding": "gzip"}
+    return body, headers
 
 
 def _label(method: str, path: str) -> str:
@@ -174,6 +183,7 @@ class SyncTransport:
         self._own = http_client is None
         self.http = http_client or httpx.Client(timeout=timeout)
         self.timeout = timeout
+        self.gzip = False
 
     def headers(self) -> dict:
         return {
@@ -191,7 +201,7 @@ class SyncTransport:
 
     def _request(self, method: str, path: str, json: Any = None) -> Any:
         url = f"{self.base_url}{path}"
-        body, headers = _prepare(method, json, self.headers())
+        body, headers = _prepare(method, json, self.headers(), self.gzip)
         last_resp: Optional[httpx.Response] = None
         streamed_retries = 0
         for attempt in range(self.max_retries + 1):
@@ -245,6 +255,7 @@ class AsyncTransport:
         self._own = http_client is None
         self.http = http_client or httpx.AsyncClient(timeout=timeout)
         self.timeout = timeout
+        self.gzip = False
 
     def headers(self) -> dict:
         return {
@@ -262,7 +273,7 @@ class AsyncTransport:
 
     async def _request(self, method: str, path: str, json: Any = None) -> Any:
         url = f"{self.base_url}{path}"
-        body, headers = _prepare(method, json, self.headers())
+        body, headers = _prepare(method, json, self.headers(), self.gzip)
         last_resp: Optional[httpx.Response] = None
         streamed_retries = 0
         for attempt in range(self.max_retries + 1):
