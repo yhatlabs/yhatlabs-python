@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-15)
 
 - **Data checks:** `yhatlabs.check()` runs locally for series and tables, gives findings with suggested fixes, and
   `.repaired()` returns the cleaned series.
