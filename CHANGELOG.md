@@ -5,6 +5,19 @@
 - Fixed: `calendar=` failed when the time or target column had a custom name (for example `Date` and `Temp`).
 - Fixed: `evaluate(compare=...)` on a single series failed when the compared forecasts had no id column.
 - The CLI prints warnings as one clean line (`yhatlabs: warning: ...`) instead of Python's warning format.
+- Bad input now fails before anything is sent, with a message that says what to change:
+  - an empty table;
+  - timestamps so irregular that more than half of the regular grid would be missing (0.1.1 filled the gaps and warned);
+  - rows without a series id (0.1.1 dropped them silently);
+  - more targets or covariates than the API takes (`max_columns` from `/v1/limits`);
+  - a tabular target holding dates, durations, complex numbers, lists or dicts.
+- Integer time columns are steps (1, 2, 3, ...): the forecast continues them, and `freq=` says what one step is. 0.1.1 read
+  them as nanoseconds since 1970.
+- A 2-D array or a list of lists is one series per row (`series_0`, `series_1`, ...). 0.1.1 flattened it into one series.
+- Infinite values in a target are reported in a warning; they are still sent as missing.
+- Every POST carries an `Idempotency-Key` header that stays the same across its retries, so the API can recognise a retry.
+- `Limits` has `max_columns` and `capabilities`, read from `/v1/limits`. `limits.supports(name)` tells whether the API has
+  switched a feature on.
 
 ## 0.1.1 (2026-10-15)
 

@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import time
+import uuid
 from typing import Any, Optional
 
 import httpx
@@ -39,6 +40,15 @@ if os.environ.get(
     )
 
 _LABELS = {"/v1/forecast": "forecasting", "/v1/tabular/predict": "fitting and predicting", "/v1/fits": "fitting"}
+
+
+def _prepare(method: str, json: Any, headers: dict) -> tuple:
+    """The body is encoded once, and a POST carries one Idempotency-Key across all its retries, so a retry after a
+    timeout can be recognised by the API as the same call (no second fit, no second charge).
+    """
+    if method == "POST":
+        headers = {**headers, "Idempotency-Key": uuid.uuid4().hex}
+    return (None if json is None else _dumps(json)), headers
 
 
 def _label(method: str, path: str) -> str:
@@ -181,6 +191,7 @@ class SyncTransport:
 
     def _request(self, method: str, path: str, json: Any = None) -> Any:
         url = f"{self.base_url}{path}"
+        body, headers = _prepare(method, json, self.headers())
         last_resp: Optional[httpx.Response] = None
         streamed_retries = 0
         for attempt in range(self.max_retries + 1):
@@ -189,8 +200,8 @@ class SyncTransport:
                 resp = self.http.request(
                     method,
                     url,
-                    content=None if json is None else _dumps(json),
-                    headers=self.headers(),
+                    content=body,
+                    headers=headers,
                     timeout=self.timeout,
                 )
             except httpx.TimeoutException as e:
@@ -251,6 +262,7 @@ class AsyncTransport:
 
     async def _request(self, method: str, path: str, json: Any = None) -> Any:
         url = f"{self.base_url}{path}"
+        body, headers = _prepare(method, json, self.headers())
         last_resp: Optional[httpx.Response] = None
         streamed_retries = 0
         for attempt in range(self.max_retries + 1):
@@ -259,8 +271,8 @@ class AsyncTransport:
                 resp = await self.http.request(
                     method,
                     url,
-                    content=None if json is None else _dumps(json),
-                    headers=self.headers(),
+                    content=body,
+                    headers=headers,
                     timeout=self.timeout,
                 )
             except httpx.TimeoutException as e:

@@ -101,7 +101,18 @@ def _str_columns(df: pd.DataFrame, what: str) -> pd.DataFrame:
 def problem_type(y: pd.Series, task: Optional[str]) -> Optional[str]:
     if task is not None and task not in TASKS:
         raise DataError(f"task must be one of {TASKS} or None (infer); got {task!r}.")
-    n = y.dropna().nunique()
+    if (
+        pd.api.types.is_datetime64_any_dtype(y)
+        or pd.api.types.is_timedelta64_dtype(y)
+        or pd.api.types.is_complex_dtype(y)
+    ):
+        raise DataError(
+            f"The target has dtype {y.dtype}, which is neither numbers nor classes; convert it (e.g. to days or a number) first."
+        )
+    obs = y.dropna()
+    if len(obs) and obs.map(lambda v: isinstance(v, (list, dict, set, tuple))).any():
+        raise DataError("The target holds lists or dicts; each row needs one number or one class label.")
+    n = obs.nunique()
     if n < 2:
         raise DataError(
             f"The target has {n} distinct value{'s' if n != 1 else ''} in train; there is nothing to learn."
