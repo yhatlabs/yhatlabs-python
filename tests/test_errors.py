@@ -87,3 +87,16 @@ def test_streamed_error_retried_once_only(client, api):
     with pytest.raises(ServiceUnavailableError):
         client.usage()
     assert len(api.requests) == 2
+
+
+def test_standard_library_json_fallback():
+    import numpy as np
+
+    from yhatlabs._transport import _dumps, _dumps_std
+
+    body = {"series": [{"id": "s0", "values": [1.0, None, 2.5]}], "horizon": 3, "model": "chakra-ts"}
+    assert _dumps_std(body) == b'{"series":[{"id":"s0","values":[1.0,null,2.5]}],"horizon":3,"model":"chakra-ts"}'
+    assert __import__("json").loads(_dumps(body)) == __import__("json").loads(_dumps_std(body))
+    with pytest.raises(ValueError):
+        _dumps_std({"x": float("nan")})
+    assert np  # numpy values are converted before encoding, so neither encoder sees them

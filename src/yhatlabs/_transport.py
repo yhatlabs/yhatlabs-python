@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip as gzip_lib
+import json as jsonlib
 import logging
 import os
 import random
@@ -13,21 +14,22 @@ from typing import Any, Optional
 
 import httpx
 
-try:  # orjson encodes large request bodies several times faster; optional
+from ._errors import APIConnectionError, APITimeoutError, ConfigurationError, error_from_response
+from ._progress import activity
+from ._version import __version__
+
+
+def _dumps_std(obj: Any) -> bytes:
+    return jsonlib.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
+
+
+try:  # orjson (a default dependency) encodes large request bodies several times faster; the standard library is the fallback
     import orjson
 
     def _dumps(obj: Any) -> bytes:
         return orjson.dumps(obj, option=orjson.OPT_SERIALIZE_NUMPY)
 except ImportError:  # pragma: no cover
-    import json as jsonlib
-
-    def _dumps(obj: Any) -> bytes:
-        return jsonlib.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
-
-
-from ._errors import APIConnectionError, APITimeoutError, ConfigurationError, error_from_response
-from ._progress import activity
-from ._version import __version__
+    _dumps = _dumps_std
 
 log = logging.getLogger("yhatlabs")
 if os.environ.get(
