@@ -20,6 +20,7 @@ from . import _anomaly, _evaluate, _profile, _table_eval, _tabular
 from ._errors import APIError, DataError, NotFoundError, UnsupportedError, YHatError
 from ._fits import AsyncFitGroup, AsyncFittedModel, FitGroup, FittedModel, _not_deployed
 from ._forecast import Item, Limits, Prepared, _pandas, batches, build_frame, prepare, resolve_quantiles, warn_all
+from ._mask import Mask, masked
 from ._results import EvaluationResult, ForecastResult, PredictionResult
 from ._table_eval import TableEvaluation
 from ._transport import AsyncTransport, SyncTransport
@@ -82,7 +83,22 @@ def _forecast_extra(limits: Limits, quantiles: Any, samples: Optional[int], seed
     return extra
 
 
-def _unpack(batch: List[Item], reply: dict) -> List[dict]:
+def _mask_series(batch: List[Item], body: dict) -> Mask:
+    """mask_columns=True on a forecast: only target (with several targets) and covariate names are on the wire."""
+    m = Mask.of(k for it in batch for d in ((it.targets if it.multi else {}), it.past, it.known) for k in d)
+    for p in body["series"]:
+        for k in ("targets", "past_covariates", "known_covariates"):
+            if k in p:
+                p[k] = m.keys(p[k])
+    return m
+
+
+def _unpack(batch: List[Item], reply: dict, mask: Optional[Mask] = None) -> List[dict]:
+    if mask:
+        for f in reply["forecasts"]:
+            for k in ("targets", "target_samples", "target_history"):
+                if k in f:
+                    f[k] = mask.unkeys(f[k])
     by_id = {f["id"]: f for f in reply["forecasts"]}
     return [by_id[f"s{j}"] for j in range(len(batch))]
 
@@ -279,10 +295,11 @@ def _provenance(
 
 
 class _Base:
-    def __init__(self, transport: Any, limits: Optional[Limits], max_concurrency: int):
+    def __init__(self, transport: Any, limits: Optional[Limits], max_concurrency: int, mask_columns: bool = False):
         self._t = transport
         self._limits = limits
         self.max_concurrency = max(1, max_concurrency)
+        self.mask_columns = bool(mask_columns)
         self._tables: Dict[str, str] = {}  # sha256 of an uploaded parquet file -> its table id, so a table is sent once
 
     @property
@@ -311,8 +328,16 @@ class _Base:
         timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
         max_concurrency: Optional[int] = None,
+        mask_columns: Optional[bool] = None,
     ) -> Any:
-        """A copy of this client with other settings, sharing its connection: yh.with_options(timeout=1800).fit(...)."""
+        """A copy of this client with other settings, sharing its connection: yh.with_options(timeout=1800).fit(...).
+
+        Args:
+            timeout: Seconds per request.
+            max_retries: Retries of timeouts, connection errors and 408 / 409 / 429 / 5xx replies.
+            max_concurrency: Requests sent in parallel when a large input is split.
+            mask_columns: Send column names as c0, c1, ... (results keep your names).
+        """
         new = copy.copy(self)
         new._t = copy.copy(self._t)
         new._t._own = False  # closing the copy leaves the shared connection open
@@ -322,7 +347,12 @@ class _Base:
             new._t.max_retries = int(max_retries)
         if max_concurrency is not None:
             new.max_concurrency = max(1, int(max_concurrency))
+        if mask_columns is not None:
+            new.mask_columns = bool(mask_columns)
         return new
+
+    def _masking(self, mask_columns: Optional[bool]) -> bool:
+        return self.mask_columns if mask_columns is None else bool(mask_columns)
 
     def _key_hint(self) -> str:
         k = self._t.api_key
@@ -351,6 +381,7 @@ class Client(_Base):
         max_concurrency: int = 4,
         limits: Optional[Limits] = None,
         http_client: Optional[httpx.Client] = None,
+        mask_columns: bool = False,
     ):
         """
 
@@ -362,8 +393,12 @@ class Client(_Base):
             max_concurrency: Requests sent in parallel when a large input is split.
             limits: Request caps to split batches by; read from GET /v1/limits on first use when left out.
             http_client: An httpx.Client to send requests with (proxies, custom transports).
+            mask_columns: Send every column name as c0, c1, ... instead of its own; results come back under your names.
+                Values, category labels and series ids are sent as they are. Each call can override it.
         """
-        super().__init__(SyncTransport(api_key, base_url, timeout, max_retries, http_client), limits, max_concurrency)
+        super().__init__(
+            SyncTransport(api_key, base_url, timeout, max_retries, http_client), limits, max_concurrency, mask_columns
+        )
 
     def __enter__(self) -> Client:
         return self
@@ -401,14 +436,18 @@ class Client(_Base):
         season: Optional[int],
         on_error: str = "raise",
         extra: Optional[dict] = None,
+        mask: bool = False,
     ):
         """-> (one reply per item, None where its batch failed), the raw replies, and the failures."""
         bs = batches(items, self.limits)
 
         def one(b: List[Item]):
             try:
-                reply = self._t.request("POST", "/v1/series/forecast", _body(b, h, freq, model, season, extra))
-                return _unpack(b, reply), reply, None
+                body = _body(b, h, freq, model, season, extra)
+                m = _mask_series(b, body) if mask else None
+                with masked(m):
+                    reply = self._t.request("POST", "/v1/series/forecast", body)
+                return _unpack(b, reply, m), reply, None
             except APIError as e:
                 if on_error == "raise":
                     raise
@@ -425,9 +464,9 @@ class Client(_Base):
             [e for _, _, e in done if e],
         )
 
-    def _forecaster(self, h_fixed: Optional[int], freq: str, model: str, season: Optional[int]):
+    def _forecaster(self, h_fixed: Optional[int], freq: str, model: str, season: Optional[int], mask: bool = False):
         def run(items: List[Item], h: Optional[int] = None) -> Tuple[List[dict], List[float]]:
-            out, replies, _ = self._send(items, h or h_fixed, freq, model, season)
+            out, replies, _ = self._send(items, h or h_fixed, freq, model, season, mask=mask)
             return out, _native(replies)
 
         return run
@@ -455,6 +494,7 @@ class Client(_Base):
         samples: Optional[int] = None,
         seed: Optional[int] = None,
         history: bool = False,
+        mask_columns: Optional[bool] = None,
     ) -> ForecastResult:
         """Forecast the next `h` steps of every series in `data`.
 
@@ -474,6 +514,8 @@ class Client(_Base):
             samples: Return this many sample paths per series (1 to 1000) in result.samples.
             seed: Random seed for the sample paths.
             history: Also return the model's forecasts of the windows just before the forecast (result.history).
+            mask_columns: Send target and covariate names as c0, c1, ...; the result keeps your names. Default: the client's
+                setting (False).
             calendar: True adds hour, weekday, month and weekend as known covariates (no future= needed for them);
                 {"holidays": "US"} also adds a holiday flag.
             data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
@@ -515,7 +557,9 @@ class Client(_Base):
             static=static,
             future=future,
         )
-        out, replies, errors = self._send(prep.items, h, prep.freq, model, season, on_error, extra)
+        out, replies, errors = self._send(
+            prep.items, h, prep.freq, model, season, on_error, extra, self._masking(mask_columns)
+        )
         res = _forecast_result(prep, model, quantiles, prep.items, out, replies, errors, mean)
         res.samples, res.history = _extras(prep, out, res)
         res.timing = {"total_s": round(time.monotonic() - t0, 3), "requests": len(replies)}
@@ -557,7 +601,7 @@ class Client(_Base):
         Args:
             futures: {scenario name: future table of the known covariates}, one table per scenario.
             known: The covariate columns the scenarios set.
-            kw: Any other forecast() option (id_col, time_col, freq, past, static, ...).
+            kw: Any other forecast() option (id_col, time_col, freq, past, static, mask_columns, ...).
             data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
                 with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
             h: How many steps to forecast, at the series' own frequency.
@@ -595,6 +639,7 @@ class Client(_Base):
         past: Cols = None,
         static: Cols = None,
         calendar: Calendar = None,
+        mask_columns: Optional[bool] = None,
     ) -> EvaluationResult:
         """Rolling-origin backtest: `windows` cutoffs `step` apart (default h) at the end of each series, each forecast `h` ahead and
         scored against the actuals. Known covariates are read from `data` itself. compare: your own forecasts to score alongside,
@@ -602,6 +647,8 @@ class Client(_Base):
         skill against the first baseline (1 - geometric-mean error ratio; > 0 beats it).
 
         Args:
+            mask_columns: Send target and covariate names as c0, c1, ...; results keep your names. Default: the
+                client's setting (False).
             windows: How many backtest windows, ending at the end of each series.
             step: Steps between window cutoffs. Default: h (windows do not overlap).
             models: The models to score.
@@ -654,7 +701,7 @@ class Client(_Base):
             season=season,
             known=known,
             compare=compare,
-            forecaster=lambda m, items: self._forecaster(h, prep.freq, m, season)(items),
+            forecaster=lambda m, items: self._forecaster(h, prep.freq, m, season, self._masking(mask_columns))(items),
         )
         res = EvaluationResult(out[0], out[1], out[2], out[3], windows, h, list(prep.warnings) + out[4])
         warn_all(res.warnings)
@@ -677,11 +724,14 @@ class Client(_Base):
         static: Cols = None,
         season: Optional[int] = None,
         calendar: Calendar = None,
+        mask_columns: Optional[bool] = None,
     ) -> pd.DataFrame:
         """Scores the last windows x h points of each series against forecasts made from the history before each window.
         score = (actual - median) / the forecast's own spread; |score| > threshold marks `anomaly`. h defaults to one season.
 
         Args:
+            mask_columns: Send target and covariate names as c0, c1, ...; results keep your names. Default: the
+                client's setting (False).
             h: Points scored per window. Default: max(season, 8).
             windows: How many windows back from the end are scored.
             threshold: Score above which a point is flagged (its distance from the forecast, in units of the forecast's
@@ -721,7 +771,12 @@ class Client(_Base):
             future=None,
         )
         out, warns = _anomaly.anomalies(
-            prep, h, windows, threshold, known, self._forecaster(None, prep.freq, model, season)
+            prep,
+            h,
+            windows,
+            threshold,
+            known,
+            self._forecaster(None, prep.freq, model, season, self._masking(mask_columns)),
         )
         warn_all(list(prep.warnings) + warns)
         return out
@@ -740,11 +795,14 @@ class Client(_Base):
         past: Cols = None,
         static: Cols = None,
         season: Optional[int] = None,
+        mask_columns: Optional[bool] = None,
     ) -> pd.DataFrame:
         """Fills missing values (and missing timestamps) inside each series with the median forecast from the history before the
         gap. Returns the regular grid: id, time, targets, and a `<target>_filled` flag per target.
 
         Args:
+            mask_columns: Send target and covariate names as c0, c1, ...; results keep your names. Default: the
+                client's setting (False).
             max_gap: Longest run of missing points to fill. Default: the API's maximum horizon.
             data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
                 with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
@@ -781,7 +839,9 @@ class Client(_Base):
             for k in known:
                 it.known[k] = it.past.pop(k)
         out, warns = _anomaly.gaps(
-            prep, max_gap or self.limits.max_horizon, self._forecaster(None, prep.freq, model, season)
+            prep,
+            max_gap or self.limits.max_horizon,
+            self._forecaster(None, prep.freq, model, season, self._masking(mask_columns)),
         )
         warn_all([w for w in prep.warnings if not w.startswith("Filled ")] + warns)  # filling them is the point here
         return out
@@ -805,6 +865,8 @@ class Client(_Base):
         time_col: Optional[str] = None,
         set_coverage: Optional[float] = None,
         _refs: Optional[Dict[str, dict]] = None,
+        mask_columns: Optional[bool] = None,
+        _mask: Optional[Mask] = None,
     ) -> PredictionResult:
         """Fit on `train` and predict `test` in one call (nothing is kept; to predict again from the same fit, use fit()).
 
@@ -818,6 +880,8 @@ class Client(_Base):
         server uses 0 when omitted, so results are already reproducible.
 
         Args:
+            mask_columns: Send column names as c0, c1, ...; results keep your names. Default: the client's setting
+                (False).
             quantiles: Regression: interval levels in (0, 1), e.g. [0.05, 0.5, 0.95], up to 32.
             time_col: A column of times: validation folds are contiguous periods of it, so intervals hold for later
                 periods. It stays a feature.
@@ -850,12 +914,14 @@ class Client(_Base):
             time_col=time_col,
             set_coverage=set_coverage,
         )
-        refs = _refs if _refs is not None else self._refs(train=tr, test=te)
+        m = _mask or (Mask.of([*tr.columns, *te.columns]) if self._masking(mask_columns) else None)
+        wtr, wte = (m.frame(tr), m.frame(te)) if m else (tr, te)
+        refs = _refs if _refs is not None else self._refs(train=wtr, test=wte)
         body = _tabular.payload(
             model,
-            tr,
-            target,
-            te,
+            wtr,
+            m.name(target) if m else target,
+            wte,
             pt,
             preset,
             eval_metric,
@@ -863,13 +929,15 @@ class Client(_Base):
             seed,
             self.limits.max_tabular_bytes,
             q,
-            extra,
+            m.options(extra) if m else extra,
             refs,
         )
         t0 = time.monotonic()
+        with masked(m):
+            reply = self._t.request("POST", "/v1/table/predict", body)
         res = _predict_result(
             model,
-            self._t.request("POST", "/v1/table/predict", body),
+            reply,
             te,
             _tabular.label_values(tr[target]),
             warns,
@@ -966,6 +1034,7 @@ class Client(_Base):
         eval_metric: Optional[str] = None,
         quantiles: Any = None,
         seed: int = 0,
+        mask_columns: Optional[bool] = None,
     ) -> TableEvaluation:
         """Cross-validate on your own table: each row is predicted by a fit that never saw it, then scored for accuracy and for
         how honest the uncertainty is.
@@ -977,6 +1046,8 @@ class Client(_Base):
         Cost: one fit-and-predict call per fold; the rows predicted add up to the table's size.
 
         Args:
+            mask_columns: Send column names as c0, c1, ...; results keep your names. Default: the client's setting
+                (False).
             data: The whole table, target included; every row is predicted once by a fit that did not see it.
             cv: Number of folds, at least 2.
             groups: A column (or one value per row) whose rows stay in the same fold.
@@ -1000,7 +1071,8 @@ class Client(_Base):
         split = "time-ordered" if time_col else ("grouped" if groups is not None else "shuffled")
         drop = [groups] if isinstance(groups, str) else []
         parts, warns = [], []
-        full = _tabular.upload_candidate(df) if self.limits.supports("table_uploads") else None
+        m = Mask.of(df.columns) if self._masking(mask_columns) else None
+        full = _tabular.upload_candidate(m.frame(df) if m else df) if self.limits.supports("table_uploads") else None
         base = (
             self._upload(full) if full is not None else None
         )  # a large table is uploaded once; each fold names its rows
@@ -1017,7 +1089,10 @@ class Client(_Base):
                     eval_metric=eval_metric,
                     quantiles=q,
                     seed=seed,
-                    _refs=_fold_refs(base, tr, te, target, drop),
+                    _refs=_fold_refs(
+                        base, tr, te, m.name(target) if m else target, [m.name(d) for d in drop] if m else drop
+                    ),
+                    _mask=m,
                 )
             warns += [str(x.message) for x in w]
             parts.append((k, te, res))
@@ -1041,6 +1116,7 @@ class Client(_Base):
         profile: bool = True,
         groups: Optional[str] = None,
         time_col: Optional[str] = None,
+        mask_columns: Optional[bool] = None,
     ) -> Union[FittedModel, FitGroup]:
         """Fit once on our side and get a handle to predict (with intervals for regression) and explain as often as you like;
         each prediction sends only the rows to score. The fit is kept for ttl_hours (default 24, at most 168) or until
@@ -1051,6 +1127,8 @@ class Client(_Base):
         explains and deletes them together; task= may then be a dict per target. One fit's quota per target.
 
         Args:
+            mask_columns: Send column names as c0, c1, ...; results keep your names. Default: the client's setting
+                (False).
             target: The column to predict, or a list of columns: one fit per target, returned as a FitGroup.
             ttl_hours: How long the fit is kept, at most 168. Default: 24.
             profile: Keep a summary of the training table on the handle for out_of_range and novelty (stays on your
@@ -1080,6 +1158,7 @@ class Client(_Base):
                 profile=profile,
                 groups=groups,
                 time_col=time_col,
+                mask_columns=mask_columns,
             )
             frame = _tabular._frame(_pandas(train), "train")
             made: Dict[str, FittedModel] = {}
@@ -1105,10 +1184,12 @@ class Client(_Base):
         _tabular.check_options(preset, eval_metric)
         tr, pt, warns = _tabular.prepare_train(train, target, task=task, limits=self.limits)
         extra = _tabular.split_options(tr, target, groups, time_col, None, pt)
+        m = Mask.of(tr.columns) if self._masking(mask_columns) else None
+        wtr = m.frame(tr) if m else tr
         body = _tabular.fit_payload(
             model,
-            tr,
-            target,
+            wtr,
+            m.name(target) if m else target,
             pt,
             preset,
             eval_metric,
@@ -1116,11 +1197,12 @@ class Client(_Base):
             seed,
             ttl_hours,
             self.limits.max_tabular_bytes,
-            extra,
-            self._refs(train=tr),
+            m.options(extra) if m else extra,
+            self._refs(train=wtr),
         )
         try:
-            reply = self._t.request("POST", "/v1/table/fits", body)
+            with masked(m):
+                reply = self._t.request("POST", "/v1/table/fits", body)
         except NotFoundError as e:
             if e.type == "not_found":
                 raise _not_deployed(e) from e
@@ -1130,6 +1212,8 @@ class Client(_Base):
             reply, _tabular.features_of(tr, target, groups), _tabular.label_values(tr[target]), self
         )
         fm.profile = _profile.build(tr, fm.features or []) if profile else None
+        if m:
+            fm.target, fm.mask = target, m.wire
         return fm
 
     def get_fit(self, fit_id: str) -> FittedModel:
@@ -1141,12 +1225,20 @@ class Client(_Base):
         return self._t.request("GET", "/v1/table/fits")["data"]
 
     def impute(
-        self, df: pd.DataFrame, columns: Cols = None, *, model: str = DEFAULT_TAB_MODEL, preset: Optional[str] = None
+        self,
+        df: pd.DataFrame,
+        columns: Cols = None,
+        *,
+        model: str = DEFAULT_TAB_MODEL,
+        preset: Optional[str] = None,
+        mask_columns: Optional[bool] = None,
     ) -> pd.DataFrame:
         """Fills missing cells of a table: for each column with gaps, the model learns it from the other columns on the rows
         where it is present and predicts the rest (one call per column). The result's .attrs['filled'] marks what was filled.
 
         Args:
+            mask_columns: Send column names as c0, c1, ...; results keep your names. Default: the client's setting
+                (False).
             df: The table with missing values.
             columns: Which columns to fill. Default: every column with missing values.
             model: The model name, as GET /v1/models lists it.
@@ -1167,6 +1259,7 @@ class Client(_Base):
                 model=model,
                 task=_impute_task(df[c]),
                 preset=preset,
+                mask_columns=mask_columns,
             )
             out.loc[~known_rows, c] = res.predictions.to_numpy()
             filled.loc[~known_rows, c] = True
@@ -1204,8 +1297,11 @@ class AsyncClient(_Base):
         max_concurrency: int = 4,
         limits: Optional[Limits] = None,
         http_client: Optional[httpx.AsyncClient] = None,
+        mask_columns: bool = False,
     ):
-        super().__init__(AsyncTransport(api_key, base_url, timeout, max_retries, http_client), limits, max_concurrency)
+        super().__init__(
+            AsyncTransport(api_key, base_url, timeout, max_retries, http_client), limits, max_concurrency, mask_columns
+        )
 
     async def __aenter__(self) -> AsyncClient:
         return self
@@ -1225,16 +1321,18 @@ class AsyncClient(_Base):
         season: Optional[int],
         on_error: str = "raise",
         extra: Optional[dict] = None,
+        mask: bool = False,
     ):
         sem = asyncio.Semaphore(self.max_concurrency)
 
         async def one(b: List[Item]):
             async with sem:
                 try:
-                    reply = await self._t.request(
-                        "POST", "/v1/series/forecast", _body(b, h, freq, model, season, extra)
-                    )
-                    return _unpack(b, reply), reply, None
+                    body = _body(b, h, freq, model, season, extra)
+                    m = _mask_series(b, body) if mask else None
+                    with masked(m):
+                        reply = await self._t.request("POST", "/v1/series/forecast", body)
+                    return _unpack(b, reply, m), reply, None
                 except APIError as e:
                     if on_error == "raise":
                         raise
@@ -1270,6 +1368,7 @@ class AsyncClient(_Base):
         samples: Optional[int] = None,
         seed: Optional[int] = None,
         history: bool = False,
+        mask_columns: Optional[bool] = None,
     ) -> ForecastResult:
         t0 = time.monotonic()
         data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq, target_col)
@@ -1288,7 +1387,9 @@ class AsyncClient(_Base):
             static=static,
             future=future,
         )
-        out, replies, errors = await self._send(prep.items, h, prep.freq, model, season, on_error, extra)
+        out, replies, errors = await self._send(
+            prep.items, h, prep.freq, model, season, on_error, extra, self._masking(mask_columns)
+        )
         res = _forecast_result(prep, model, quantiles, prep.items, out, replies, errors, mean)
         res.samples, res.history = _extras(prep, out, res)
         res.timing = {"total_s": round(time.monotonic() - t0, 3), "requests": len(replies)}
@@ -1332,6 +1433,7 @@ class AsyncClient(_Base):
         past: Cols = None,
         static: Cols = None,
         calendar: Calendar = None,
+        mask_columns: Optional[bool] = None,
     ) -> EvaluationResult:
         data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq, target_col)
         known = list(known or [])
@@ -1356,7 +1458,7 @@ class AsyncClient(_Base):
         )
         done = {}
         for model in models:  # the forecasts first, concurrently per model; scoring then runs on them
-            out, replies, _ = await self._send(items, h, prep.freq, model, season)
+            out, replies, _ = await self._send(items, h, prep.freq, model, season, mask=self._masking(mask_columns))
             done[model] = (out, _native(replies))
         out = _evaluate.run(
             prep,
@@ -1392,6 +1494,8 @@ class AsyncClient(_Base):
         time_col: Optional[str] = None,
         set_coverage: Optional[float] = None,
         _refs: Optional[Dict[str, dict]] = None,
+        mask_columns: Optional[bool] = None,
+        _mask: Optional[Mask] = None,
     ) -> PredictionResult:
         tr, te, pt, q, warns, extra = _tabular.prepare(
             train,
@@ -1406,12 +1510,14 @@ class AsyncClient(_Base):
             time_col=time_col,
             set_coverage=set_coverage,
         )
-        refs = _refs if _refs is not None else await self._refs(train=tr, test=te)
+        m = _mask or (Mask.of([*tr.columns, *te.columns]) if self._masking(mask_columns) else None)
+        wtr, wte = (m.frame(tr), m.frame(te)) if m else (tr, te)
+        refs = _refs if _refs is not None else await self._refs(train=wtr, test=wte)
         body = _tabular.payload(
             model,
-            tr,
-            target,
-            te,
+            wtr,
+            m.name(target) if m else target,
+            wte,
             pt,
             preset,
             eval_metric,
@@ -1419,13 +1525,15 @@ class AsyncClient(_Base):
             seed,
             self.limits.max_tabular_bytes,
             q,
-            extra,
+            m.options(extra) if m else extra,
             refs,
         )
         t0 = time.monotonic()
+        with masked(m):
+            reply = await self._t.request("POST", "/v1/table/predict", body)
         res = _predict_result(
             model,
-            await self._t.request("POST", "/v1/table/predict", body),
+            reply,
             te,
             _tabular.label_values(tr[target]),
             warns,
@@ -1487,6 +1595,7 @@ class AsyncClient(_Base):
         eval_metric: Optional[str] = None,
         quantiles: Any = None,
         seed: int = 0,
+        mask_columns: Optional[bool] = None,
     ) -> TableEvaluation:
         """Client.evaluate_table, with the folds run concurrently."""
         df = _tabular._frame(_pandas(data), "data")
@@ -1498,7 +1607,8 @@ class AsyncClient(_Base):
         split = "time-ordered" if time_col else ("grouped" if groups is not None else "shuffled")
         drop = [groups] if isinstance(groups, str) else []
         splits = _table_eval.folds(df, cv, groups, time_col, seed)
-        full = _tabular.upload_candidate(df) if self.limits.supports("table_uploads") else None
+        m = Mask.of(df.columns) if self._masking(mask_columns) else None
+        full = _tabular.upload_candidate(m.frame(df) if m else df) if self.limits.supports("table_uploads") else None
         base = await self._upload(full) if full is not None else None
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -1514,7 +1624,10 @@ class AsyncClient(_Base):
                         eval_metric=eval_metric,
                         quantiles=q,
                         seed=seed,
-                        _refs=_fold_refs(base, tr, te, target, drop),
+                        _refs=_fold_refs(
+                            base, tr, te, m.name(target) if m else target, [m.name(d) for d in drop] if m else drop
+                        ),
+                        _mask=m,
                     )
                     for tr, te in splits
                 ]
@@ -1546,6 +1659,7 @@ class AsyncClient(_Base):
         profile: bool = True,
         groups: Optional[str] = None,
         time_col: Optional[str] = None,
+        mask_columns: Optional[bool] = None,
     ) -> Union[AsyncFittedModel, AsyncFitGroup]:
         if not isinstance(target, str):
             targets = _targets(target, train)
@@ -1559,6 +1673,7 @@ class AsyncClient(_Base):
                 profile=profile,
                 groups=groups,
                 time_col=time_col,
+                mask_columns=mask_columns,
             )
             frame = _tabular._frame(_pandas(train), "train")
             outs = await asyncio.gather(
@@ -1583,10 +1698,12 @@ class AsyncClient(_Base):
         _tabular.check_options(preset, eval_metric)
         tr, pt, warns = _tabular.prepare_train(train, target, task=task, limits=self.limits)
         extra = _tabular.split_options(tr, target, groups, time_col, None, pt)
+        m = Mask.of(tr.columns) if self._masking(mask_columns) else None
+        wtr = m.frame(tr) if m else tr
         body = _tabular.fit_payload(
             model,
-            tr,
-            target,
+            wtr,
+            m.name(target) if m else target,
             pt,
             preset,
             eval_metric,
@@ -1594,11 +1711,12 @@ class AsyncClient(_Base):
             seed,
             ttl_hours,
             self.limits.max_tabular_bytes,
-            extra,
-            await self._refs(train=tr),
+            m.options(extra) if m else extra,
+            await self._refs(train=wtr),
         )
         try:
-            reply = await self._t.request("POST", "/v1/table/fits", body)
+            with masked(m):
+                reply = await self._t.request("POST", "/v1/table/fits", body)
         except NotFoundError as e:
             if e.type == "not_found":
                 raise _not_deployed(e) from e
@@ -1608,6 +1726,8 @@ class AsyncClient(_Base):
             reply, _tabular.features_of(tr, target, groups), _tabular.label_values(tr[target]), self
         )
         fm.profile = _profile.build(tr, fm.features or []) if profile else None
+        if m:
+            fm.target, fm.mask = target, m.wire
         return AsyncFittedModel(**{k: getattr(fm, k) for k in fm.__dataclass_fields__})
 
     async def models(self) -> List[Dict[str, Any]]:

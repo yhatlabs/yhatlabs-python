@@ -20,6 +20,7 @@ import pandas as pd
 from . import _profile, _tabular
 from ._errors import ConfigurationError, DataError, NotFoundError, UnsupportedError
 from ._forecast import Limits, warn_all
+from ._mask import Mask, masked
 from ._results import PredictionResult
 from ._version import __version__
 
@@ -49,6 +50,7 @@ class FittedModel:
     profile: Optional[Dict[str, Any]] = field(
         default=None, repr=False
     )  # the training table's ranges and a row sample (_profile)
+    mask: Optional[Dict[str, str]] = field(default=None, repr=False)  # mask_columns=True: real column name -> wire name
 
     @classmethod
     def from_reply(cls, reply: dict, features: Optional[List[str]], labels: List[Any], client: Any) -> FittedModel:
@@ -93,6 +95,7 @@ class FittedModel:
             "expires_at": self.expires_at,
             "intervals": self.intervals,
             "profile": self.profile,
+            "mask": self.mask,
         }
         if path is not None:
             Path(path).write_text(json.dumps(rec, indent=2, default=str))
@@ -122,6 +125,9 @@ class FittedModel:
 
     def __exit__(self, *exc: Any) -> None:
         self.delete()
+
+    def _mask(self) -> Optional[Mask]:
+        return Mask(self.mask) if self.mask else None
 
     def _test(self, test: Any, quantiles: Any, limits: Limits):
         if self.features is not None:
@@ -164,12 +170,15 @@ class FittedModel:
         te, q, warns = self._test(test, quantiles, c.limits)
         cov = _tabular.check_coverage(set_coverage, self.problem_type)
         t0 = time.monotonic()
-        ref = c._refs(test=te).get("test")
-        reply = c._t.request(
-            "POST",
-            f"/v1/table/fits/{self.id}/predict",
-            _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov, ref),
-        )
+        m = self._mask()
+        wte = m.frame(te) if m else te
+        ref = c._refs(test=wte).get("test")
+        with masked(m):
+            reply = c._t.request(
+                "POST",
+                f"/v1/table/fits/{self.id}/predict",
+                _tabular.test_payload(wte, q, c.limits.max_tabular_bytes, cov, ref),
+            )
         return self._result(reply, te, warns, bool(q), time.monotonic() - t0)
 
     def predict_proba(self, test: Any) -> pd.DataFrame:
@@ -197,14 +206,14 @@ class FittedModel:
             num_shuffle_sets: Repeats per column; more gives a tighter stddev.
             time_limit: Seconds for the call.
         """
-        c = self._c()
-        return _importance(
-            c._t.request(
+        c, m = self._c(), self._mask()
+        with masked(m):
+            reply = c._t.request(
                 "POST",
                 f"/v1/table/fits/{self.id}/importance",
-                _importance_body(data, subsample_size, num_shuffle_sets, time_limit),
+                _importance_body(data, subsample_size, num_shuffle_sets, time_limit, m),
             )
-        )
+        return _importance(reply, m)
 
     def effect(self, col: str, *, grid: Any = 20, data: Any = None, rows: int = 200, seed: int = 0) -> pd.DataFrame:
         """How the prediction moves as one column varies, everything else as in real rows (partial dependence).
@@ -242,12 +251,15 @@ class AsyncFittedModel(FittedModel):
         te, q, warns = self._test(test, quantiles, c.limits)
         cov = _tabular.check_coverage(set_coverage, self.problem_type)
         t0 = time.monotonic()
-        ref = (await c._refs(test=te)).get("test")
-        reply = await c._t.request(
-            "POST",
-            f"/v1/table/fits/{self.id}/predict",
-            _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov, ref),
-        )
+        m = self._mask()
+        wte = m.frame(te) if m else te
+        ref = (await c._refs(test=wte)).get("test")
+        with masked(m):
+            reply = await c._t.request(
+                "POST",
+                f"/v1/table/fits/{self.id}/predict",
+                _tabular.test_payload(wte, q, c.limits.max_tabular_bytes, cov, ref),
+            )
         return self._result(reply, te, warns, bool(q), time.monotonic() - t0)
 
     async def predict_proba(self, test: Any) -> pd.DataFrame:  # type: ignore[override]
@@ -264,14 +276,14 @@ class AsyncFittedModel(FittedModel):
         num_shuffle_sets: int = 3,
         time_limit: Optional[float] = None,
     ) -> pd.DataFrame:  # type: ignore[override]
-        c = self._c()
-        return _importance(
-            await c._t.request(
+        c, m = self._c(), self._mask()
+        with masked(m):
+            reply = await c._t.request(
                 "POST",
                 f"/v1/table/fits/{self.id}/importance",
-                _importance_body(data, subsample_size, num_shuffle_sets, time_limit),
+                _importance_body(data, subsample_size, num_shuffle_sets, time_limit, m),
             )
-        )
+        return _importance(reply, m)
 
     async def effect(
         self, col: str, *, grid: Any = 20, data: Any = None, rows: int = 200, seed: int = 0
@@ -499,20 +511,25 @@ class AsyncFitGroup(FitGroup):
 IMPORTANCE_MAX_BYTES = 16 * 1024 * 1024
 
 
-def _importance_body(data: Any, subsample_size: int, num_shuffle_sets: int, time_limit: Optional[float]) -> dict:
+def _importance_body(
+    data: Any, subsample_size: int, num_shuffle_sets: int, time_limit: Optional[float], mask: Optional[Mask] = None
+) -> dict:
     body: dict = {"subsample_size": int(subsample_size), "num_shuffle_sets": int(num_shuffle_sets)}
     if time_limit is not None:
         body["time_limit"] = float(time_limit)
     if data is not None:
-        enc, size = _tabular.encode_table(_tabular._str_columns(_tabular._frame(data, "data"), "data"))
+        df = _tabular._str_columns(_tabular._frame(data, "data"), "data")
+        enc, size = _tabular.encode_table(mask.frame(df) if mask else df)
         if size > IMPORTANCE_MAX_BYTES:
             raise DataError("data for importance may be at most 16 MB; pass a sample (a few thousand rows is plenty).")
         body["data"] = enc
     return body
 
 
-def _importance(reply: dict) -> pd.DataFrame:
+def _importance(reply: dict, mask: Optional[Mask] = None) -> pd.DataFrame:
     out = pd.DataFrame(reply["features"], columns=["feature", "importance", "stddev"])
+    if mask:
+        out["feature"] = out["feature"].map(mask.unname)
     out.attrs.update(source=reply.get("source"), metric=reply.get("metric"), fit_id=reply.get("fit_id"))
     return out
 
@@ -550,6 +567,7 @@ def load(source: Union[str, Path, Dict[str, Any]], client: Any = None) -> Fitted
         rec.get("labels") or [],
         client,
         rec.get("profile"),
+        rec.get("mask"),
     )
     if fm.expired:
         warnings.warn(

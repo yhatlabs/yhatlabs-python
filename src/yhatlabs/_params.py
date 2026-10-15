@@ -35,5 +35,7 @@ SHARED = {
     "seed": "Random seed; the server uses 0 when it is left out, so results are reproducible.",
     "groups": "A column whose rows belong together (machine, batch, patient, store): validation folds hold out whole groups, so "
     "intervals hold for groups the model has not seen. The column is not used as a feature.",
+    "mask_columns": "Send column names as c0, c1, ... instead of your own; every result comes back under your names. Values, "
+    "category labels and series ids are sent as they are. Default: the client's setting (False).",
     "set_coverage": "Classification: return prediction sets that hold the true class this often, e.g. 0.9.",
 }
