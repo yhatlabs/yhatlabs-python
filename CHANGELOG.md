@@ -51,6 +51,8 @@
   - `yh.estimate_table(...)`: the credits a tabular call will cost, from the rates the API publishes.
   - Tables over 8 MB (as parquet) are uploaded once, by content hash, and referred to by id; `evaluate_table` uploads a large
     table once for all its folds. Used when the API lists the `table_uploads` capability.
+- `yhatlabs.hierarchy`: `aggregate()` builds every level's series (stores into regions into a total) and `reconcile()` makes the
+  forecasts add up across the levels.
 - Plots: `yhatlabs.plots` has forecast (nested interval bands), backtest, anomalies, scenarios, calibration, reliability,
   predicted against actual, importance and effect. `EvaluationResult.plot()` and `TableEvaluation.plot()` use them.
 

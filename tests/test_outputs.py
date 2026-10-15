@@ -269,3 +269,30 @@ def test_large_tables_are_uploaded_once_and_folds_name_their_rows(client, api, m
     assert all(f["train"]["format"] == "table" and f["test"]["drop"] == ["cls"] for f in folds)
     assert sorted(i for f in folds for i in f["test"]["rows"]) == list(range(len(df)))  # every row scored once
     assert len(ev.predictions) == len(df) and len(api.tables) == 1  # the same bytes as before: nothing new to upload
+
+
+def test_hierarchy_aggregate_and_reconcile(client):
+    from yhatlabs import hierarchy
+
+    rng = np.random.default_rng(0)
+    days = pd.date_range("2026-01-01", periods=60, freq="D")
+    rows = [
+        {"region": r, "store": s, "date": d, "units": float(rng.poisson(10 + 5 * i))}
+        for i, (r, s) in enumerate([("N", "a"), ("N", "b"), ("S", "c")])
+        for d in days
+    ]
+    sales = pd.DataFrame(rows)
+    data, tree = hierarchy.aggregate(
+        sales, levels=[["region"], ["region", "store"]], time_col="date", target_col="units"
+    )
+    assert tree["total"] == ["region=N", "region=S"] and tree["region=N"] == ["region=N/store=a", "region=N/store=b"]
+    assert np.isclose(data[data.unique_id == "total"].units.sum(), sales.units.sum())
+    client.limits = __import__("yhatlabs").Limits(max_series=10)
+    fc = client.forecast(data, h=5, time_col="date", target_col="units")
+    rec = hierarchy.reconcile(fc, tree)
+    w = rec.df.pivot(index="date", columns="unique_id", values="median")
+    assert np.allclose(w["total"], w["region=N"] + w["region=S"])
+    assert np.allclose(w["region=N"], w["region=N/store=a"] + w["region=N/store=b"])
+    assert "median" in rec.derived and rec.provenance["reconciled"]["bottom"] == 3
+    with pytest.raises(DataError, match="without a forecast"):
+        hierarchy.reconcile(fc, {**tree, "nowhere": ["x"]})
