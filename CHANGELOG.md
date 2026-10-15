@@ -35,6 +35,15 @@
   - `model.effect(col)`: how the prediction moves as one column varies (partial dependence, with the spread across rows).
   - `yh.fit(train, target=["a", "b"])` fits each target on the features alone and returns a `FitGroup`; its `predict`,
     `importance`, `effect`, `save` and `delete` cover every target.
+- Tables, uncertainty:
+  - Regression intervals come from each row's own predictive distribution where the API offers it (`res.interval_method`
+    is `"distribution"`), so an easy row gets a narrow interval and a hard or unusual one a wide one; `res.mean` is that
+    distribution's mean.
+  - `groups="machine"` or `time_col="date"` on `fit` and `predict`: the model's own validation holds out whole groups or
+    periods, so its intervals hold for groups it has not seen (random folds overstate them).
+  - `set_coverage=0.9` on classification: `res.prediction_sets` lists, per row, the classes that together hold the true one
+    90% of the time.
+  - `yh.estimate_table(...)`: the credits a tabular call will cost, from the rates the API publishes.
 - Plots: `yhatlabs.plots` has forecast (nested interval bands), backtest, anomalies, scenarios, calibration, reliability,
   predicted against actual, importance and effect. `EvaluationResult.plot()` and `TableEvaluation.plot()` use them.
 

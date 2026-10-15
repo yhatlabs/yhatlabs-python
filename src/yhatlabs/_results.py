@@ -191,6 +191,9 @@ class PredictionResult:
     prediction_sets: Optional[pd.Series] = None  # classification with set_coverage=: the classes per row (a list)
     set_coverage: Optional[float] = None
     interval_method: Optional[str] = None  # how regression quantiles were made: "distribution" (per row) or "conformal"
+    mean: Optional[pd.Series] = (
+        None  # regression with a per-row distribution: its mean (the prediction column is the fit's point)
+    )
 
     @property
     def out_of_range(self) -> Optional[pd.Series]:
@@ -249,6 +252,8 @@ class PredictionResult:
             out = out.join(self.probabilities.add_prefix("p_"))
         if self.quantiles is not None:
             out = out.join(self.quantiles)
+        if self.mean is not None:
+            out = out.join(self.mean)
         if self.prediction_sets is not None:
             out = out.join(self.prediction_sets)
         return out

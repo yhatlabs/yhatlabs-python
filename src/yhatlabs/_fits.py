@@ -144,7 +144,7 @@ class FittedModel:
             preds, self.model, proba, classes, self.fit, warns, reply.get("id"), reply.get("usage") or {}, q, self.id
         )
         res.prediction_sets, res.set_coverage = _tabular.parse_sets(reply, te, self.labels), reply.get("set_coverage")
-        res.interval_method = reply.get("interval_method")
+        res.interval_method, res.mean = reply.get("interval_method"), _tabular.parse_mean(reply, te)
         warn_all(res.warnings)
         res.timing = {"total_s": round(elapsed, 3), "restored": bool(reply.get("restored"))}
         res.checks = _profile.Checks(self.profile, te) if self.profile else None

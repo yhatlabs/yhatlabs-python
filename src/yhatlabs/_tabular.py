@@ -360,6 +360,11 @@ def test_payload(
     return body
 
 
+def parse_mean(reply: dict, test: pd.DataFrame) -> Optional[pd.Series]:
+    m = reply.get("mean")
+    return None if m is None else pd.Series(np.asarray(m, dtype=float), index=test.index, name="mean")
+
+
 def parse_sets(reply: dict, test: pd.DataFrame, labels: List[Any]) -> Optional[pd.Series]:
     sets = reply.get("prediction_sets")
     if sets is None:

@@ -139,7 +139,7 @@ def _predict_result(
     fit = reply.get("fit") or {}
     res = PredictionResult(preds, model, proba, classes, fit, warns, reply.get("id"), reply.get("usage") or {}, q)
     res.prediction_sets, res.set_coverage = _tabular.parse_sets(reply, test, labels), reply.get("set_coverage")
-    res.interval_method = reply.get("interval_method")
+    res.interval_method, res.mean = reply.get("interval_method"), _tabular.parse_mean(reply, test)
     res.timing = {k: fit[k] for k in ("fit_s", "predict_s") if fit.get(k) is not None}
     return res
 
