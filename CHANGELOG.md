@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 (2026-10-15)
+
+- Fixed: requests failed without the optional `orjson` package (a plain `pip install yhatlabs`). The standard-library JSON
+  fallback is now used correctly, and CI tests the install without extras.
+
 ## 0.1.0 (2026-10-15)
 
 - **Data checks:** `yhatlabs.check()` runs locally for series and tables, gives findings with suggested fixes, and
