@@ -190,7 +190,7 @@ def plot_reliability(table: pd.DataFrame, ax: Any) -> Any:
         _, ax = plt.subplots(figsize=(4.5, 4.5), layout="constrained")
     ax.plot([0, 1], [0, 1], color="0.6", lw=1, ls="--", label="calibrated")
     for cls, t in table.groupby("class", sort=False) if "class" in table.columns else [(None, table)]:
-        ax.plot(t["predicted"], t["observed"], marker="o", ms=4, label="model" if cls is None else str(cls))
+        ax.plot(t["predicted"], t["observed"], marker="o", ms=4, label="model" if cls is None else f"P({cls})")
     ax.set_xlabel("predicted probability")
     ax.set_ylabel("observed frequency")
     ax.set_xlim(0, 1), ax.set_ylim(0, 1)
@@ -206,12 +206,13 @@ def plot_predicted_vs_actual(pred: pd.DataFrame, actual: Any, ax: Any) -> Any:
     y = np.asarray(actual, dtype=float)
     p = pred["prediction"].to_numpy(dtype=float)
     bands = _bands(pred.columns)
-    if bands:
+    ax.scatter(y, p, s=8, alpha=0.6, label="prediction")
+    if bands:  # error bars on at most 150 rows, so a large table stays readable
         lo, hi, w = bands[0]
-        err = np.vstack([p - pred[lo].to_numpy(float), pred[hi].to_numpy(float) - p]).clip(min=0)
-        ax.errorbar(y, p, yerr=err, fmt="o", ms=3, alpha=0.6, elinewidth=0.6, label=f"prediction ({w:g}% interval)")
-    else:
-        ax.scatter(y, p, s=8, alpha=0.6, label="prediction")
+        idx = np.random.default_rng(0).choice(len(p), min(len(p), 150), replace=False)
+        err = np.vstack([p - pred[lo].to_numpy(float), pred[hi].to_numpy(float) - p]).clip(min=0)[:, idx]
+        n = f", {len(idx)} of {len(p)} rows" if len(idx) < len(p) else ""
+        ax.errorbar(y[idx], p[idx], yerr=err, fmt="none", alpha=0.35, elinewidth=0.8, label=f"{w:g}% interval{n}")
     lim = [np.nanmin([y.min(), p.min()]), np.nanmax([y.max(), p.max()])]
     ax.plot(lim, lim, color="0.6", lw=1, ls="--")
     ax.set_xlabel("actual")
