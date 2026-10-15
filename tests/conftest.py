@@ -28,6 +28,7 @@ class FakeAPI:
         self.fits: dict = {}
         self.no_fits = False  # behave like a gateway without /v1/fits
         self.fail_batches = set()  # forecast requests (by order) that answer 500
+        self.capabilities: dict = {}  # what /v1/limits advertises
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content) if request.content else None
@@ -55,6 +56,7 @@ class FakeAPI:
                         "max_horizon": 48,
                     },
                     "tabular": {"max_rows": 1000, "max_bytes": 10_000_000},
+                    "capabilities": self.capabilities,
                 },
             )
         if path.startswith("/v1/fits"):
@@ -64,12 +66,24 @@ class FakeAPI:
             if n_forecast in self.fail_batches:
                 return httpx.Response(500, json={"error": {"type": "internal_error", "message": "boom"}})
             h = body["horizon"]
+            levels = body.get("quantile_levels") or LEVELS
+            q = lambda last: [[last + (lv - 0.5) * 10 for lv in levels] for _ in range(h)]  # noqa: E731
             fcs = []
             for s in body["series"]:
                 if "targets" in s:
-                    fcs.append({"id": s["id"], "targets": {k: _deciles(_last(v), h) for k, v in s["targets"].items()}})
+                    f = {"id": s["id"], "targets": {k: q(_last(v)) for k, v in s["targets"].items()}}
                 else:
-                    fcs.append({"id": s["id"], "quantiles": _deciles(_last(s["values"]), h)})
+                    f = {"id": s["id"], "quantiles": q(_last(s["values"]))}
+                    last = _last(s["values"])
+                    if body.get("samples"):
+                        f["samples"] = [[last + k for _ in range(h)] for k in range(body["samples"])]
+                    if body.get("history"):
+                        T = len(s["values"])
+                        f["history"] = [
+                            {"cutoff": T - 2 * h, "quantiles": q(last)},
+                            {"cutoff": T - h, "quantiles": q(last)},
+                        ]
+                fcs.append(f)
             n = len(body["series"])
             return httpx.Response(
                 200,
@@ -77,7 +91,7 @@ class FakeAPI:
                     "id": f"req_{len(self.requests)}",
                     "model": body["model"],
                     "horizon": h,
-                    "quantile_levels": LEVELS,
+                    "quantile_levels": levels,
                     "forecasts": fcs,
                     "usage": {"series": n},
                 },
@@ -143,7 +157,12 @@ class FakeAPI:
                 },
             )
         if parts[3] == "predict":
-            r = self.tabular(fb["train"], body["test"], fb["target"], {**fb, "quantiles": body.get("quantiles"), "set_coverage": body.get("set_coverage")})
+            r = self.tabular(
+                fb["train"],
+                body["test"],
+                fb["target"],
+                {**fb, "quantiles": body.get("quantiles"), "set_coverage": body.get("set_coverage")},
+            )
             j = json.loads(r.content)
             j.pop("fit", None)
             j["fit_id"] = fid

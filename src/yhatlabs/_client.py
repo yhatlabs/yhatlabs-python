@@ -12,11 +12,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import httpx
+import numpy as np
 import pandas as pd
 from pandas.util import hash_pandas_object
 
 from . import _anomaly, _evaluate, _profile, _table_eval, _tabular
-from ._errors import APIError, DataError, NotFoundError, YHatError
+from ._errors import APIError, DataError, NotFoundError, UnsupportedError, YHatError
 from ._fits import AsyncFitGroup, AsyncFittedModel, FitGroup, FittedModel, _not_deployed
 from ._forecast import Item, Limits, Prepared, _pandas, batches, build_frame, prepare, resolve_quantiles, warn_all
 from ._results import EvaluationResult, ForecastResult, PredictionResult
@@ -42,7 +43,9 @@ Target = Optional[Union[str, Sequence[str]]]
 Cols = Optional[Sequence[str]]
 
 
-def _body(batch: List[Item], h: int, freq: str, model: str, season: Optional[int]) -> dict:
+def _body(
+    batch: List[Item], h: int, freq: str, model: str, season: Optional[int], extra: Optional[dict] = None
+) -> dict:
     body: dict = {
         "model": model,
         "horizon": h,
@@ -51,7 +54,32 @@ def _body(batch: List[Item], h: int, freq: str, model: str, season: Optional[int
     }
     if season is not None:
         body["season"] = int(season)
+    body.update(extra or {})
     return body
+
+
+def _forecast_extra(limits: Limits, quantiles: Any, samples: Optional[int], seed: Optional[int], history: bool) -> dict:
+    """Request fields for levels beyond the model's deciles, sample paths and past windows, each used once the API lists it."""
+    extra: dict = {}
+    try:
+        resolve_quantiles(quantiles, ASSUMED_NATIVE)
+    except UnsupportedError:
+        if not limits.supports("forecast_quantile_levels"):
+            raise
+        extra["quantile_levels"] = resolve_quantiles(quantiles, [1e-6, 1 - 1e-6])[0]
+    if samples is not None:
+        if not isinstance(samples, (int, np.integer)) or not 1 <= samples <= 1000:
+            raise DataError("samples must be an integer from 1 to 1000.")
+        if not limits.supports("forecast_samples"):
+            raise UnsupportedError("This API does not return sample paths yet.")
+        extra["samples"] = int(samples)
+        if seed is not None:
+            extra["seed"] = int(seed)
+    if history:
+        if not limits.supports("forecast_history"):
+            raise UnsupportedError("This API does not return past-window forecasts yet.")
+        extra["history"] = True
+    return extra
 
 
 def _unpack(batch: List[Item], reply: dict) -> List[dict]:
@@ -89,6 +117,14 @@ def _targets(target: Sequence[str], train: Any) -> List[str]:
     if missing:
         raise DataError(f"targets {missing} are not columns of train.")
     return targets
+
+
+def _extras(prep: Prepared, outs: List[Optional[dict]], res: ForecastResult):
+    """Sample paths and past-window forecasts, when the request asked for them, as long tables."""
+    from ._forecast import build_history, build_samples
+
+    kept = [(it, o) for it, o in zip(prep.items, outs) if o is not None]
+    return build_samples(prep, kept), build_history(prep, kept, res.native_quantile_levels)
 
 
 def _forecast_result(
@@ -336,13 +372,22 @@ class Client(_Base):
 
     # ---- time series ----
 
-    def _send(self, items: List[Item], h: int, freq: str, model: str, season: Optional[int], on_error: str = "raise"):
+    def _send(
+        self,
+        items: List[Item],
+        h: int,
+        freq: str,
+        model: str,
+        season: Optional[int],
+        on_error: str = "raise",
+        extra: Optional[dict] = None,
+    ):
         """-> (one reply per item, None where its batch failed), the raw replies, and the failures."""
         bs = batches(items, self.limits)
 
         def one(b: List[Item]):
             try:
-                reply = self._t.request("POST", "/v1/forecast", _body(b, h, freq, model, season))
+                reply = self._t.request("POST", "/v1/forecast", _body(b, h, freq, model, season, extra))
                 return _unpack(b, reply), reply, None
             except APIError as e:
                 if on_error == "raise":
@@ -387,6 +432,9 @@ class Client(_Base):
         season: Optional[int] = None,
         on_error: str = "raise",
         calendar: Calendar = None,
+        samples: Optional[int] = None,
+        seed: Optional[int] = None,
+        history: bool = False,
     ) -> ForecastResult:
         """Forecast the next `h` steps of every series in `data`.
 
@@ -402,7 +450,7 @@ class Client(_Base):
         t0 = time.monotonic()
         data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq, target_col)
         quantiles = _levels(quantiles, level)
-        resolve_quantiles(quantiles, ASSUMED_NATIVE)
+        extra = _forecast_extra(self.limits, quantiles, samples, seed, history)
         prep = _prep(
             data,
             h,
@@ -416,8 +464,9 @@ class Client(_Base):
             static=static,
             future=future,
         )
-        out, replies, errors = self._send(prep.items, h, prep.freq, model, season, on_error)
+        out, replies, errors = self._send(prep.items, h, prep.freq, model, season, on_error, extra)
         res = _forecast_result(prep, model, quantiles, prep.items, out, replies, errors, mean)
+        res.samples, res.history = _extras(prep, out, res)
         res.timing = {"total_s": round(time.monotonic() - t0, 3), "requests": len(replies)}
         res.provenance = _provenance(
             self.base_url,
@@ -925,14 +974,21 @@ class AsyncClient(_Base):
         await self._t.aclose()
 
     async def _send(
-        self, items: List[Item], h: int, freq: str, model: str, season: Optional[int], on_error: str = "raise"
+        self,
+        items: List[Item],
+        h: int,
+        freq: str,
+        model: str,
+        season: Optional[int],
+        on_error: str = "raise",
+        extra: Optional[dict] = None,
     ):
         sem = asyncio.Semaphore(self.max_concurrency)
 
         async def one(b: List[Item]):
             async with sem:
                 try:
-                    reply = await self._t.request("POST", "/v1/forecast", _body(b, h, freq, model, season))
+                    reply = await self._t.request("POST", "/v1/forecast", _body(b, h, freq, model, season, extra))
                     return _unpack(b, reply), reply, None
                 except APIError as e:
                     if on_error == "raise":
@@ -966,11 +1022,14 @@ class AsyncClient(_Base):
         season: Optional[int] = None,
         on_error: str = "raise",
         calendar: Calendar = None,
+        samples: Optional[int] = None,
+        seed: Optional[int] = None,
+        history: bool = False,
     ) -> ForecastResult:
         t0 = time.monotonic()
         data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq, target_col)
         quantiles = _levels(quantiles, level)
-        resolve_quantiles(quantiles, ASSUMED_NATIVE)
+        extra = _forecast_extra(self.limits, quantiles, samples, seed, history)
         prep = _prep(
             data,
             h,
@@ -984,8 +1043,9 @@ class AsyncClient(_Base):
             static=static,
             future=future,
         )
-        out, replies, errors = await self._send(prep.items, h, prep.freq, model, season, on_error)
+        out, replies, errors = await self._send(prep.items, h, prep.freq, model, season, on_error, extra)
         res = _forecast_result(prep, model, quantiles, prep.items, out, replies, errors, mean)
+        res.samples, res.history = _extras(prep, out, res)
         res.timing = {"total_s": round(time.monotonic() - t0, 3), "requests": len(replies)}
         res.provenance = _provenance(
             self.base_url,

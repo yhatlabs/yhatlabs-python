@@ -219,3 +219,32 @@ def test_groups_time_col_and_prediction_sets(client, api):
     assert [r for r in api.requests if r[1] == "/v1/fits"][-1][2]["groups"] == "machine"
     assert "machine" not in m.features
     assert m.predict(test, set_coverage=0.8).set_coverage == 0.8
+
+
+def test_forecast_levels_samples_and_history_follow_the_capabilities(client, api, hourly):
+    from yhatlabs import Limits, UnsupportedError
+
+    with pytest.raises(UnsupportedError):
+        client.forecast(hourly, h=4, level=[95])
+    with pytest.raises(UnsupportedError):
+        client.forecast(hourly, h=4, samples=10)
+    caps = {"forecast_quantile_levels": True, "forecast_samples": True, "forecast_history": True}
+    client.limits = Limits(capabilities=caps)
+    fc = client.forecast(hourly, h=4, level=[95], samples=5, seed=3, history=True)
+    body = [r for r in api.requests if r[1] == "/v1/forecast"][-1][2]
+    assert (
+        body["quantile_levels"] == [0.025, 0.5, 0.975]
+        and body["samples"] == 5
+        and body["seed"] == 3
+        and body["history"] is True
+    )
+    assert list(fc.df.columns) == ["unique_id", "ds", "q2.5", "median", "q97.5"] and fc.derived == []
+    assert fc.intervals(95).columns[-2:].tolist() == ["lower_95", "upper_95"]
+    assert len(fc.samples) == 2 * 5 * 4 and set(fc.samples.columns) == {"unique_id", "ds", "sample", "value"}
+    paths = fc.sample_paths("a")
+    assert paths.shape == (5, 4)
+    assert set(fc.history.columns) >= {"unique_id", "cutoff", "ds", "median"} and fc.history.cutoff.nunique() == 2
+    a = fc.history[fc.history.unique_id == "a"]
+    assert (a.ds > a.cutoff).all()
+    with pytest.raises(DataError, match="1 to 1000"):
+        client.forecast(hourly, h=4, samples=0)

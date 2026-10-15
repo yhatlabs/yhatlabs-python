@@ -62,6 +62,21 @@ class ForecastResult:
         default_factory=dict
     )  # what produced this: model, settings, request ids, data fingerprint
     timing: Dict[str, Any] = field(default_factory=dict)  # seconds: total (client side, wall clock) and per request
+    samples: Optional[pd.DataFrame] = None  # samples=N: id, time, sample, value (one path per sample number)
+    history: Optional[pd.DataFrame] = None  # history=True: the model's own past-window forecasts, by cutoff
+
+    def sample_paths(self, uid: Any = None) -> Any:
+        """Sample paths of one series as an array [samples, h] (the first series by default). Sums, maxima or counts over the
+        horizon get honest uncertainty from these: e.g. np.quantile(fc.sample_paths("a").sum(axis=1), [0.05, 0.95]).
+        """
+        from ._errors import DataError
+
+        if self.samples is None:
+            raise DataError("No sample paths: forecast with samples=N.")
+        idc = self.samples.columns[0]
+        uid = self.samples[idc].iloc[0] if uid is None else uid
+        s = self.samples[self.samples[idc] == uid]
+        return s.pivot(index="sample", columns=s.columns[1], values="value").to_numpy()
 
     def to_polars(self) -> Any:
         import polars as pl

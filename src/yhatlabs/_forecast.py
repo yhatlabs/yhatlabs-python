@@ -590,6 +590,63 @@ def build_frame(
     return out
 
 
+def _steps(it: Item, start: int, n: int) -> Any:
+    """Timestamps (or integer steps) of positions start .. start + n - 1 of an item's sent history, continuing past its end."""
+    T = it.length
+    hist = it.times if it.times is not None else pd.Index(np.arange(T))
+    pos = np.arange(start, start + n)
+    inside = pos[pos < T]
+    vals = list(hist[inside])
+    if len(inside) < n:
+        vals += list(it.future_times[: n - len(inside)])
+    return vals
+
+
+def build_samples(prep: Prepared, kept: List[Tuple[Item, dict]]) -> Optional[pd.DataFrame]:
+    """Sample paths as a long table: id, time, (target), sample, value. None when none were asked for."""
+    frames = []
+    for it, r in kept:
+        per = r.get("target_samples") or ({prep.target_cols[0]: r["samples"]} if "samples" in r else None)
+        if not per:
+            continue
+        for col, S in per.items():
+            S = np.asarray(S, dtype=float)
+            n, h = S.shape
+            f = pd.DataFrame(
+                {
+                    prep.id_col: it.uid,
+                    prep.time_col: np.tile(np.asarray(it.future_times[:h], dtype=object), n),
+                    "sample": np.repeat(np.arange(n), h),
+                    "value": S.reshape(-1),
+                }
+            )
+            if it.multi:
+                f.insert(2, "target", col)
+            frames.append(f)
+    return pd.concat(frames, ignore_index=True) if frames else None
+
+
+def build_history(prep: Prepared, kept: List[Tuple[Item, dict]], levels: Sequence[float]) -> Optional[pd.DataFrame]:
+    """The past windows the model scored itself on (its backtest), as a table: id, cutoff, time, (target), quantile columns."""
+    frames = []
+    for it, r in kept:
+        per = r.get("target_history") or ({prep.target_cols[0]: r["history"]} if "history" in r else None)
+        if not per:
+            continue
+        for col, windows in per.items():
+            for w in windows:
+                q = np.asarray(w["quantiles"], dtype=float)
+                cut = int(w["cutoff"])
+                f = pd.DataFrame(q, columns=[qname(lv) for lv in levels])
+                f.insert(0, prep.time_col, _steps(it, cut, len(q)))
+                f.insert(0, "cutoff", _steps(it, cut - 1, 1)[0])
+                f.insert(0, prep.id_col, it.uid)
+                if it.multi:
+                    f.insert(3, "target", col)
+                frames.append(f)
+    return pd.concat(frames, ignore_index=True) if frames else None
+
+
 def warn_all(msgs: List[str]) -> None:
     for m in msgs:
         _warnings.warn(m, stacklevel=3)

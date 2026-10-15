@@ -24,6 +24,11 @@
     are summed later; the median stays the point forecast.
   - `fc.intervals(80)` returns `lower_80` / `upper_80` next to the median; `fc.to_wide()` gives one column per series.
   - `fc.prob(above=limit)` / `fc.prob(below=limit)`: the chance of crossing a limit at each step.
+- Forecasts, uncertainty (each switched on when the API lists it in its capabilities):
+  - any quantile levels, including 95% and 99% intervals (`level=[95]`, `quantiles=[0.01, ...]`);
+  - `samples=N` (and `seed=`): sample paths over the horizon in `fc.samples`, `fc.sample_paths(id)`; sums, peaks and counts
+    over the horizon get honest intervals from them;
+  - `history=True`: the model's own forecasts of the last windows before the forecast, with their cutoffs (`fc.history`).
 - Tables:
   - `yh.evaluate_table(df, target, cv=5, groups=..., time_col=...)` cross-validates on your data: shuffled, grouped (a group
     never sits on both sides) or time-ordered folds. It reports accuracy, log loss, AUC, Brier and calibration error with a
