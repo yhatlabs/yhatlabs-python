@@ -474,6 +474,29 @@ class Client(_Base):
             samples: Return this many sample paths per series (1 to 1000) in result.samples.
             seed: Random seed for the sample paths.
             history: Also return the model's forecasts of the windows just before the forecast (result.history).
+            calendar: True adds hour, weekday, month and weekend as known covariates (no future= needed for them);
+                {"holidays": "US"} also adds a holiday flag.
+            data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
+                with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
+            freq: The series' frequency as a pandas alias (h, D, W-SUN, MS, 15min, ...). Inferred from the timestamps
+                when left out; required for arrays and integer time steps.
+            future: The known covariates over the next h steps: id, time and the known columns.
+            h: How many steps to forecast, at the series' own frequency.
+            id_col: The column naming each series. Default: unique_id, id, item_id or series_id if present, else one
+                series.
+            known: Covariate columns whose future values you know (prices, weather forecasts, holidays); their future
+                values go in future=.
+            level: Central intervals by width in percent, e.g. [80, 95]; the alternative to quantiles=.
+            model: The model name, as GET /v1/models lists it.
+            past: Covariate columns known only up to now (observed loads, sensor readings).
+            quantiles: Quantile levels in (0, 1), e.g. [0.1, 0.5, 0.9], or "all" for every level the model produces.
+                Default [0.1, 0.5, 0.9].
+            season: The seasonal period in steps (24 for daily cycles of hourly data), to fix it instead of inferring it
+                from freq.
+            static: Columns that are constant per series (region, store size).
+            target_col: The column (or list of columns) to forecast. Default: y, target or value if present, else the
+                one numeric column.
+            time_col: The timestamp column. Default: ds, timestamp, time, date or datetime if present.
         """
         t0 = time.monotonic()
         data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq, target_col)
@@ -535,6 +558,13 @@ class Client(_Base):
             futures: {scenario name: future table of the known covariates}, one table per scenario.
             known: The covariate columns the scenarios set.
             kw: Any other forecast() option (id_col, time_col, freq, past, static, ...).
+            data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
+                with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
+            h: How many steps to forecast, at the series' own frequency.
+            level: Central intervals by width in percent, e.g. [80, 95]; the alternative to quantiles=.
+            model: The model name, as GET /v1/models lists it.
+            quantiles: Quantile levels in (0, 1), e.g. [0.1, 0.5, 0.9], or "all" for every level the model produces.
+                Default [0.1, 0.5, 0.9].
         """
         if not futures:
             raise DataError("futures must map scenario names to future DataFrames.")
@@ -579,6 +609,24 @@ class Client(_Base):
             metrics: Scores to compute per window: mase, sql, wql, mae, rmse, coverage@<level>.
             compare: Your own forecasts to score on the same windows: {name: table with the time (and id) column and
                 quantile columns, or a forecast column}.
+            calendar: True adds hour, weekday, month and weekend as known covariates (no future= needed for them);
+                {"holidays": "US"} also adds a holiday flag.
+            data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
+                with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
+            freq: The series' frequency as a pandas alias (h, D, W-SUN, MS, 15min, ...). Inferred from the timestamps
+                when left out; required for arrays and integer time steps.
+            h: How many steps to forecast, at the series' own frequency.
+            id_col: The column naming each series. Default: unique_id, id, item_id or series_id if present, else one
+                series.
+            known: Covariate columns whose future values you know (prices, weather forecasts, holidays); their future
+                values go in future=.
+            past: Covariate columns known only up to now (observed loads, sensor readings).
+            season: The seasonal period in steps (24 for daily cycles of hourly data), to fix it instead of inferring it
+                from freq.
+            static: Columns that are constant per series (region, store size).
+            target_col: The column (or list of columns) to forecast. Default: y, target or value if present, else the
+                one numeric column.
+            time_col: The timestamp column. Default: ds, timestamp, time, date or datetime if present.
         """
         data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq, target_col)
         known = list(known or [])
@@ -638,6 +686,24 @@ class Client(_Base):
             windows: How many windows back from the end are scored.
             threshold: Score above which a point is flagged (its distance from the forecast, in units of the forecast's
                 spread).
+            calendar: True adds hour, weekday, month and weekend as known covariates (no future= needed for them);
+                {"holidays": "US"} also adds a holiday flag.
+            data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
+                with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
+            freq: The series' frequency as a pandas alias (h, D, W-SUN, MS, 15min, ...). Inferred from the timestamps
+                when left out; required for arrays and integer time steps.
+            id_col: The column naming each series. Default: unique_id, id, item_id or series_id if present, else one
+                series.
+            known: Covariate columns whose future values you know (prices, weather forecasts, holidays); their future
+                values go in future=.
+            model: The model name, as GET /v1/models lists it.
+            past: Covariate columns known only up to now (observed loads, sensor readings).
+            season: The seasonal period in steps (24 for daily cycles of hourly data), to fix it instead of inferring it
+                from freq.
+            static: Columns that are constant per series (region, store size).
+            target_col: The column (or list of columns) to forecast. Default: y, target or value if present, else the
+                one numeric column.
+            time_col: The timestamp column. Default: ds, timestamp, time, date or datetime if present.
         """
         data, _, known = _with_calendar(data, None, None, calendar, known, id_col, time_col, freq, target_col)
         known = list(known or [])
@@ -680,6 +746,22 @@ class Client(_Base):
 
         Args:
             max_gap: Longest run of missing points to fill. Default: the API's maximum horizon.
+            data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
+                with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
+            freq: The series' frequency as a pandas alias (h, D, W-SUN, MS, 15min, ...). Inferred from the timestamps
+                when left out; required for arrays and integer time steps.
+            id_col: The column naming each series. Default: unique_id, id, item_id or series_id if present, else one
+                series.
+            known: Covariate columns whose future values you know (prices, weather forecasts, holidays); their future
+                values go in future=.
+            model: The model name, as GET /v1/models lists it.
+            past: Covariate columns known only up to now (observed loads, sensor readings).
+            season: The seasonal period in steps (24 for daily cycles of hourly data), to fix it instead of inferring it
+                from freq.
+            static: Columns that are constant per series (region, store size).
+            target_col: The column (or list of columns) to forecast. Default: y, target or value if present, else the
+                one numeric column.
+            time_col: The timestamp column. Default: ds, timestamp, time, date or datetime if present.
         """
         known = list(known or [])
         prep = _prep(
@@ -739,6 +821,21 @@ class Client(_Base):
             quantiles: Regression: interval levels in (0, 1), e.g. [0.05, 0.5, 0.95], up to 32.
             time_col: A column of times: validation folds are contiguous periods of it, so intervals hold for later
                 periods. It stays a feature.
+            eval_metric: What validation optimises: log_loss (default), roc_auc, f1, ... for classification; rmse
+                (default), mae, r2 for regression.
+            groups: A column whose rows belong together (machine, batch, patient, store): validation folds hold out
+                whole groups, so intervals hold for groups the model has not seen. The column is not used as a feature.
+            model: The model name, as GET /v1/models lists it.
+            preset: "fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).
+            seed: Random seed; the server uses 0 when it is left out, so results are reproducible.
+            set_coverage: Classification: return prediction sets that hold the true class this often, e.g. 0.9.
+            target: The column to predict.
+            task: "classify", "regress", or None to let the server infer it. Pass it for integer targets (a 1-5 rating
+                could be either).
+            test: The rows to predict, with the same feature columns as train. Without it, the rows of train whose
+                target is empty are predicted.
+            time_limit: Seconds for the whole call.
+            train: The training table: one row per example, the target column included.
         """
         tr, te, pt, q, warns, extra = _tabular.prepare(
             train,
@@ -821,6 +918,7 @@ class Client(_Base):
             train_rows: Training rows, when no table is passed.
             features: Feature columns, when no table is passed.
             predict_rows: Rows to predict, when no table is passed.
+            preset: "fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).
         """
         if train is not None:
             df = _tabular._frame(_pandas(train), "train")
@@ -884,6 +982,14 @@ class Client(_Base):
             groups: A column (or one value per row) whose rows stay in the same fold.
             time_col: Time-ordered folds instead: each fold trains only on rows before its block.
             quantiles: Regression interval levels to score. Default: 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95.
+            eval_metric: What validation optimises: log_loss (default), roc_auc, f1, ... for classification; rmse
+                (default), mae, r2 for regression.
+            model: The model name, as GET /v1/models lists it.
+            preset: "fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).
+            seed: Random seed; the server uses 0 when it is left out, so results are reproducible.
+            target: The column to predict.
+            task: "classify", "regress", or None to let the server infer it. Pass it for integer targets (a 1-5 rating
+                could be either).
         """
         df = _tabular._frame(_pandas(data), "data")
         if target not in df.columns:
@@ -950,6 +1056,17 @@ class Client(_Base):
             profile: Keep a summary of the training table on the handle for out_of_range and novelty (stays on your
                 machine).
             time_col: A column of times: validation folds are contiguous periods of it. It stays a feature.
+            eval_metric: What validation optimises: log_loss (default), roc_auc, f1, ... for classification; rmse
+                (default), mae, r2 for regression.
+            groups: A column whose rows belong together (machine, batch, patient, store): validation folds hold out
+                whole groups, so intervals hold for groups the model has not seen. The column is not used as a feature.
+            model: The model name, as GET /v1/models lists it.
+            preset: "fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).
+            seed: Random seed; the server uses 0 when it is left out, so results are reproducible.
+            task: "classify", "regress", or None to let the server infer it. Pass it for integer targets (a 1-5 rating
+                could be either).
+            time_limit: Seconds for the whole call.
+            train: The training table: one row per example, the target column included.
         """
         if not isinstance(target, str):
             targets = _targets(target, train)
@@ -1032,6 +1149,8 @@ class Client(_Base):
         Args:
             df: The table with missing values.
             columns: Which columns to fill. Default: every column with missing values.
+            model: The model name, as GET /v1/models lists it.
+            preset: "fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).
         """
         out = df.copy()
         filled = pd.DataFrame(False, index=df.index, columns=df.columns)

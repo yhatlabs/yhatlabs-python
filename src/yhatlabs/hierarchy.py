@@ -40,6 +40,9 @@ def aggregate(
         data: The bottom-level rows.
         levels: From the top down, the columns that define each level; the last is the bottom.
         total: Name of the series summing everything, or None for no total.
+        target_col: The column (or list of columns) to forecast. Default: y, target or value if present, else the one
+            numeric column.
+        time_col: The timestamp column. Default: ds, timestamp, time, date or datetime if present.
     """
     df = _pandas(data).copy()
     levels = [list(lv) for lv in levels]
