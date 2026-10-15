@@ -262,6 +262,7 @@ class PredictionResult:
 
     @property
     def df(self) -> pd.DataFrame:
+        """Everything per row in one table: prediction, p_<class> or quantile columns, mean, prediction_set, indexed like test."""
         out = pd.DataFrame({"prediction": self.predictions})
         if self.probabilities is not None:
             out = out.join(self.probabilities.add_prefix("p_"))

@@ -166,6 +166,7 @@ class FittedModel:
         return self._result(reply, te, warns, bool(q), time.monotonic() - t0)
 
     def predict_proba(self, test: Any) -> pd.DataFrame:
+        """Classification: one probability column per class, indexed like test."""
         res = self.predict(test)
         if res.probabilities is None:
             raise DataError("predict_proba applies to classification fits.")
@@ -205,9 +206,11 @@ class FittedModel:
         return _effect_frame(self.predict(stacked), col, values, len(stacked) // len(values))
 
     def delete(self) -> None:
+        """Delete the fit on our side (its stored training request and the fitted model). Expired fits are deleted anyway."""
         self._c()._t.request("DELETE", f"/v1/fits/{self.id}")
 
     def info(self) -> Dict[str, Any]:
+        """The fit as the API holds it: model, target, summary, classes, expiry."""
         return self._c()._t.request("GET", f"/v1/fits/{self.id}")
 
 
@@ -400,6 +403,7 @@ class FitGroup:
         return out[["target"] + [c for c in out.columns if c != "target"]]
 
     def effect(self, col: str, **kw: Any) -> pd.DataFrame:
+        """FittedModel.effect for every target, stacked with a `target` column."""
         frames = [m.effect(col, **kw).assign(target=t) for t, m in self.fits.items()]
         out = pd.concat(frames, ignore_index=True)
         return out[["target"] + [c for c in out.columns if c != "target"]]
@@ -409,6 +413,7 @@ class FitGroup:
             m.delete()
 
     def save(self, path: Any = None) -> Dict[str, Any]:
+        """Every target's fit record in one file; yhatlabs.load(path) gives the FitGroup back."""
         rec = {"format": GROUP_FORMAT, "fits": {t: m.save() for t, m in self.fits.items()}}
         if path is not None:
             Path(path).write_text(json.dumps(rec, indent=2, default=str))

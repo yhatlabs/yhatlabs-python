@@ -988,6 +988,7 @@ class Client(_Base):
         return self._t.request("GET", "/v1/models")["models"]
 
     def usage(self) -> Dict[str, Any]:
+        """Series (forecasts) and credits (tables) used and left, this month and in total."""
         return self._t.request("GET", "/v1/usage")
 
     def server_limits(self, apply: bool = True) -> Dict[str, Any]:
