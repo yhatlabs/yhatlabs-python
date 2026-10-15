@@ -3,7 +3,9 @@
 ## 0.1.1 (2026-10-15)
 
 - Fixed: requests failed without the optional `orjson` package (a plain `pip install yhatlabs`). The standard-library JSON
-  fallback is now used correctly, and CI tests the install without extras.
+  fallback is now used correctly.
+- CI runs the full test suite on an install without any extras; tests that need an extra skip themselves.
+- `pandas.util.hash_pandas_object` is imported explicitly rather than through the `pd.util` attribute.
 
 ## 0.1.0 (2026-10-15)
 

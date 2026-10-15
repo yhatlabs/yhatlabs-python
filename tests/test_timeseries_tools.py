@@ -54,6 +54,7 @@ def test_scenarios(client, hourly):
 
 
 def test_features():
+    pytest.importorskip("holidays")
     df = pd.DataFrame({"ds": pd.date_range("2026-12-24", periods=72, freq="h"), "y": 1.0})
     out = add_calendar(df, holidays="US")
     assert {"hour", "dayofweek", "month", "is_weekend", "is_holiday"} <= set(out.columns)
@@ -136,3 +137,18 @@ def test_cli(api, hourly, tmp_path, monkeypatch, capsys):
     assert "score" in capsys.readouterr().out
     assert main(["models"]) == 0 and "chakra-ts" in capsys.readouterr().out
     assert main(["forecast", str(src), "--h", "0"]) == 1
+
+
+def test_holidays_missing_gives_clear_error(monkeypatch):
+    import builtins
+
+    from yhatlabs import ConfigurationError
+
+    real = builtins.__import__
+    monkeypatch.setattr(
+        builtins,
+        "__import__",
+        lambda n, *a, **k: (_ for _ in ()).throw(ImportError(n)) if n == "holidays" else real(n, *a, **k),
+    )
+    with pytest.raises(ConfigurationError, match="pip install holidays"):
+        add_calendar(pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=3, freq="D")}), holidays="US")

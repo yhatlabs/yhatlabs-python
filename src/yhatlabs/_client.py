@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import httpx
 import pandas as pd
+from pandas.util import hash_pandas_object
 
 from . import _anomaly, _evaluate, _tabular
 from ._errors import APIError, DataError, NotFoundError, YHatError
@@ -191,7 +192,7 @@ def _fingerprint(data: Any) -> Optional[str]:
 
         d = _pandas(data)
         if isinstance(d, (pd.DataFrame, pd.Series)):
-            return hashlib.sha256(pd.util.hash_pandas_object(d, index=False).to_numpy().tobytes()).hexdigest()[:16]
+            return hashlib.sha256(hash_pandas_object(d, index=False).to_numpy().tobytes()).hexdigest()[:16]
     except Exception:
         return None
     return None

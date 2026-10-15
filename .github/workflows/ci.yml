@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv venv -p 3.12 && uv pip install -e . pytest pytest-asyncio
-      - run: uv run --no-sync pytest -q -m "not live" -k "not sklearn and not plot and not polars and not cli and not impute and not features"
+      - run: uv run --no-sync pytest -q -m "not live"   # tests needing an extra skip themselves
   changelog:
     if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'no-changelog')
     runs-on: ubuntu-latest
