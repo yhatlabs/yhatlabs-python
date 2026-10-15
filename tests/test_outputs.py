@@ -248,3 +248,24 @@ def test_forecast_levels_samples_and_history_follow_the_capabilities(client, api
     assert (a.ds > a.cutoff).all()
     with pytest.raises(DataError, match="1 to 1000"):
         client.forecast(hourly, h=4, samples=0)
+
+
+def test_large_tables_are_uploaded_once_and_folds_name_their_rows(client, api, monkeypatch):
+    pytest.importorskip("pyarrow")
+    from yhatlabs import Limits, _tabular
+
+    monkeypatch.setattr(_tabular, "UPLOAD_ABOVE_BYTES", 2_000)
+    df = _table(n=120).drop(columns=["y", "t", "machine"])
+    client.predict(df, "cls", test=df.drop(columns="cls").head(3))  # no capability: inline as before
+    assert api.slots == 0
+    client.limits = Limits(capabilities={"table_uploads": True})
+    res = client.predict(df, "cls", test=df.drop(columns="cls").head(3))
+    body = [r for r in api.requests if r[1] == "/v1/tabular/predict"][-1][2]
+    assert body["train"]["format"] == "table" and len(api.tables) == 1 and len(res.predictions) == 3
+    client.predict(df, "cls", test=df.drop(columns="cls").head(3))  # the same table again: no new slot, no upload
+    assert api.slots == 1
+    ev = client.evaluate_table(df, "cls", cv=4)
+    folds = [r[2] for r in api.requests if r[1] == "/v1/tabular/predict"][-4:]
+    assert all(f["train"]["format"] == "table" and f["test"]["drop"] == ["cls"] for f in folds)
+    assert sorted(i for f in folds for i in f["test"]["rows"]) == list(range(len(df)))  # every row scored once
+    assert len(ev.predictions) == len(df) and len(api.tables) == 1  # the same bytes as before: nothing new to upload

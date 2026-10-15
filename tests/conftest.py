@@ -29,9 +29,14 @@ class FakeAPI:
         self.no_fits = False  # behave like a gateway without /v1/fits
         self.fail_batches = set()  # forecast requests (by order) that answer 500
         self.capabilities: dict = {}  # what /v1/limits advertises
+        self.tables: dict = {}  # uploaded table id -> parquet bytes
+        self.slots = 0  # POST /v1/uploads calls
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else None
+        try:
+            body = json.loads(request.content) if request.content else None
+        except ValueError:  # an upload's bytes
+            body = None
         self.requests.append((request.method, request.url.path, body, dict(request.headers)))
         if self.script:
             status, reply = self.script.pop(0)
@@ -59,6 +64,8 @@ class FakeAPI:
                     "capabilities": self.capabilities,
                 },
             )
+        if path.startswith("/v1/uploads"):
+            return self.upload_route(request, body)
         if path.startswith("/v1/fits"):
             return self.fit_route(request.method, path, body)
         if path == "/v1/forecast":
@@ -97,8 +104,40 @@ class FakeAPI:
                 },
             )
         if path == "/v1/tabular/predict":
-            return self.tabular(body["train"], body["test"], body["target"], body)
+            return self.tabular(self.resolve(body["train"]), self.resolve(body["test"]), body["target"], body)
         return httpx.Response(404, json={"error": {"type": "not_found", "message": "nope"}})
+
+    def upload_route(self, request: httpx.Request, body):
+        tid = "tbl_" + (body["sha256"][:40] if body else request.url.path.rsplit("_", 1)[-1])
+        if request.method == "POST":
+            self.slots += 1
+            if tid in self.tables:
+                return httpx.Response(
+                    200, json={"id": tid, "object": "table", "exists": True, "size_bytes": len(self.tables[tid])}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": tid,
+                    "object": "table",
+                    "exists": False,
+                    "upload": {"method": "PUT", "url": f"/v1/uploads/{tid}", "auth": True},
+                },
+            )
+        self.tables[request.url.path.rsplit("/", 1)[-1]] = request.content
+        return httpx.Response(200, json={"id": tid, "exists": True})
+
+    def resolve(self, t):
+        """A table reference -> its rows, as the model server reads it."""
+        if not (isinstance(t, dict) and t.get("format") == "table"):
+            return t
+        import io
+
+        df = pd.read_parquet(io.BytesIO(self.tables[t["id"]]))
+        if t.get("rows") is not None:
+            df = df.iloc[t["rows"]]
+        df = df.drop(columns=[c for c in t.get("drop", []) if c in df.columns])
+        return json.loads(df.to_json(orient="records"))
 
     def fit_route(self, method: str, path: str, body):
         if self.no_fits:

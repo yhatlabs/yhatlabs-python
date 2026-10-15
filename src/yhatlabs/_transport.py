@@ -60,6 +60,13 @@ def _prepare(method: str, json: Any, headers: dict, gzip: bool = False) -> tuple
     return body, headers
 
 
+def _safe_json(r: httpx.Response) -> Any:
+    try:
+        return r.json()
+    except ValueError:
+        return {"error": {"message": r.text[:200]}}
+
+
 def _label(method: str, path: str) -> str:
     if path.endswith("/predict") and path.startswith("/v1/fits/"):
         return "predicting"
@@ -193,6 +200,18 @@ class SyncTransport:
             "Content-Type": "application/json",
         }
 
+    def put_bytes(self, url: str, data: bytes, auth: bool) -> None:
+        """An upload: to a signed storage URL (no key), or to the API itself (with the key)."""
+        url = f"{self.base_url}{url}" if url.startswith("/") else url  # a path on the API, or a signed storage URL
+        headers = {
+            "Content-Type": "application/octet-stream",
+            **({"Authorization": f"Bearer {self.api_key}"} if auth else {}),
+        }
+        with activity("uploading the table"):
+            r = self.http.put(url, content=data, headers=headers, timeout=max(self.timeout or 0, 600))
+        if r.status_code >= 400:
+            raise error_from_response(r.status_code, _safe_json(r), r.headers.get("X-Request-Id"))
+
     def request(self, method: str, path: str, json: Any = None) -> Any:
         if method == "POST":
             with activity(_label(method, path)):
@@ -264,6 +283,17 @@ class AsyncTransport:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+    async def put_bytes(self, url: str, data: bytes, auth: bool) -> None:
+        url = f"{self.base_url}{url}" if url.startswith("/") else url  # a path on the API, or a signed storage URL
+        headers = {
+            "Content-Type": "application/octet-stream",
+            **({"Authorization": f"Bearer {self.api_key}"} if auth else {}),
+        }
+        with activity("uploading the table"):
+            r = await self.http.put(url, content=data, headers=headers, timeout=max(self.timeout or 0, 600))
+        if r.status_code >= 400:
+            raise error_from_response(r.status_code, _safe_json(r), r.headers.get("X-Request-Id"))
 
     async def request(self, method: str, path: str, json: Any = None) -> Any:
         if method == "POST":

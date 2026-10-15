@@ -159,8 +159,9 @@ class FittedModel:
         te, q, warns = self._test(test, quantiles, c.limits)
         cov = _tabular.check_coverage(set_coverage, self.problem_type)
         t0 = time.monotonic()
+        ref = c._refs(test=te).get("test")
         reply = c._t.request(
-            "POST", f"/v1/fits/{self.id}/predict", _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov)
+            "POST", f"/v1/fits/{self.id}/predict", _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov, ref)
         )
         return self._result(reply, te, warns, bool(q), time.monotonic() - t0)
 
@@ -218,8 +219,9 @@ class AsyncFittedModel(FittedModel):
         te, q, warns = self._test(test, quantiles, c.limits)
         cov = _tabular.check_coverage(set_coverage, self.problem_type)
         t0 = time.monotonic()
+        ref = (await c._refs(test=te)).get("test")
         reply = await c._t.request(
-            "POST", f"/v1/fits/{self.id}/predict", _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov)
+            "POST", f"/v1/fits/{self.id}/predict", _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov, ref)
         )
         return self._result(reply, te, warns, bool(q), time.monotonic() - t0)
 

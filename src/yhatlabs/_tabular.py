@@ -52,7 +52,12 @@ def to_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return [{c: _cell(v) for c, v in zip(cols, row)} for row in df.itertuples(index=False, name=None)]
 
 
-def _parquet_b64(df: pd.DataFrame) -> Optional[dict]:
+UPLOAD_ABOVE_BYTES = (
+    8 * 1024 * 1024
+)  # parquet files above this go to POST /v1/uploads (when the API offers it) instead of the body
+
+
+def parquet_bytes(df: pd.DataFrame) -> Optional[bytes]:
     try:
         import pyarrow  # noqa: F401
     except ImportError:
@@ -61,7 +66,21 @@ def _parquet_b64(df: pd.DataFrame) -> Optional[dict]:
     out = df.copy()
     out.columns = [str(c) for c in out.columns]
     out.reset_index(drop=True).to_parquet(buf, index=False)
-    return {"format": "parquet_b64", "bytes": base64.b64encode(buf.getvalue()).decode("ascii")}
+    return buf.getvalue()
+
+
+def _parquet_b64(df: pd.DataFrame) -> Optional[dict]:
+    raw = parquet_bytes(df)
+    return None if raw is None else {"format": "parquet_b64", "bytes": base64.b64encode(raw).decode("ascii")}
+
+
+def upload_candidate(df: pd.DataFrame) -> Optional[bytes]:
+    """The table's parquet bytes when it is large enough to upload rather than send inline, else None."""
+    sample = to_records(df.head(200))
+    if len(json.dumps(sample, default=str)) * max(1.0, len(df) / max(1, len(sample))) < UPLOAD_ABOVE_BYTES:
+        return None
+    raw = parquet_bytes(df)
+    return raw if raw is not None and len(raw) > UPLOAD_ABOVE_BYTES else None
 
 
 def encode_table(df: pd.DataFrame) -> Tuple[Any, float]:
@@ -312,9 +331,11 @@ def payload(
     max_bytes: Optional[int] = None,
     quantiles: Optional[List[float]] = None,
     extra: Optional[Dict[str, Any]] = None,
+    refs: Optional[Dict[str, dict]] = None,
 ) -> dict:
-    tr, tr_size = encode_table(train)
-    te, te_size = encode_table(test)
+    refs = refs or {}
+    tr, tr_size = (refs["train"], 0.0) if "train" in refs else encode_table(train)
+    te, te_size = (refs["test"], 0.0) if "test" in refs else encode_table(test)
     _check_size([tr_size, te_size], isinstance(tr, dict), max_bytes)
     body = _options(
         {"model": model, "target": target, "train": tr, "test": te}, pt, preset, eval_metric, time_limit, seed
@@ -337,8 +358,9 @@ def fit_payload(
     ttl_hours: Optional[float],
     max_bytes: Optional[int],
     extra: Optional[Dict[str, Any]] = None,
+    refs: Optional[Dict[str, dict]] = None,
 ) -> dict:
-    tr, size = encode_table(train)
+    tr, size = (refs["train"], 0.0) if refs and "train" in refs else encode_table(train)
     _check_size([size], isinstance(tr, dict), max_bytes)
     body = _options({"model": model, "target": target, "train": tr}, pt, preset, eval_metric, time_limit, seed)
     if ttl_hours is not None:
@@ -348,9 +370,13 @@ def fit_payload(
 
 
 def test_payload(
-    test: pd.DataFrame, quantiles: Optional[List[float]], max_bytes: Optional[int], set_coverage: Optional[float] = None
+    test: pd.DataFrame,
+    quantiles: Optional[List[float]],
+    max_bytes: Optional[int],
+    set_coverage: Optional[float] = None,
+    ref: Optional[dict] = None,
 ) -> dict:
-    te, size = encode_table(test)
+    te, size = (ref, 0.0) if ref is not None else encode_table(test)
     _check_size([size], isinstance(te, dict), max_bytes)
     body: dict = {"test": te}
     if quantiles:

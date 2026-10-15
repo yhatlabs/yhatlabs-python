@@ -127,6 +127,14 @@ def _extras(prep: Prepared, outs: List[Optional[dict]], res: ForecastResult):
     return build_samples(prep, kept), build_history(prep, kept, res.native_quantile_levels)
 
 
+def _fold_refs(base: Optional[dict], tr: Any, te: Any, target: str, drop: List[str]) -> Optional[Dict[str, dict]]:
+    """A fold of an uploaded table: its training and test rows, by position, with the test target (and group column) left out."""
+    if base is None:
+        return None
+    train = {**base, "rows": [int(i) for i in tr], **({"drop": list(drop)} if drop else {})}
+    return {"train": train, "test": {**base, "rows": [int(i) for i in te], "drop": [target, *drop]}}
+
+
 def _forecast_result(
     prep: Prepared,
     model: str,
@@ -275,6 +283,7 @@ class _Base:
         self._t = transport
         self._limits = limits
         self.max_concurrency = max(1, max_concurrency)
+        self._tables: Dict[str, str] = {}  # sha256 of an uploaded parquet file -> its table id, so a table is sent once
 
     @property
     def limits(self) -> Limits:
@@ -671,6 +680,7 @@ class Client(_Base):
         groups: Optional[str] = None,
         time_col: Optional[str] = None,
         set_coverage: Optional[float] = None,
+        _refs: Optional[Dict[str, dict]] = None,
     ) -> PredictionResult:
         """Fit on `train` and predict `test` in one call (nothing is kept; to predict again from the same fit, use fit()).
 
@@ -696,8 +706,21 @@ class Client(_Base):
             time_col=time_col,
             set_coverage=set_coverage,
         )
+        refs = _refs if _refs is not None else self._refs(train=tr, test=te)
         body = _tabular.payload(
-            model, tr, target, te, pt, preset, eval_metric, time_limit, seed, self.limits.max_tabular_bytes, q, extra
+            model,
+            tr,
+            target,
+            te,
+            pt,
+            preset,
+            eval_metric,
+            time_limit,
+            seed,
+            self.limits.max_tabular_bytes,
+            q,
+            extra,
+            refs,
         )
         t0 = time.monotonic()
         res = _predict_result(
@@ -755,6 +778,27 @@ class Client(_Base):
             rates, int(train_rows or 0), int(features or 1), preset or "fast", int(predict_rows or 0)
         )
 
+    def _upload(self, raw: bytes) -> dict:
+        """Sends a parquet file once (POST /v1/uploads, then the upload it names) and returns the table reference."""
+        sha = hashlib.sha256(raw).hexdigest()
+        if sha not in self._tables:
+            slot = self._t.request("POST", "/v1/uploads", {"sha256": sha, "size_bytes": len(raw), "format": "parquet"})
+            if not slot.get("exists"):
+                self._t.put_bytes(slot["upload"]["url"], raw, bool(slot["upload"].get("auth")))
+            self._tables[sha] = slot["id"]
+        return {"format": "table", "id": self._tables[sha]}
+
+    def _refs(self, **tables: Optional[pd.DataFrame]) -> Dict[str, dict]:
+        """Large tables as uploaded-table references (when the API offers uploads); small ones stay inline."""
+        if not self.limits.supports("table_uploads"):
+            return {}
+        out = {}
+        for name, df in tables.items():
+            raw = _tabular.upload_candidate(df) if df is not None else None
+            if raw is not None:
+                out[name] = self._upload(raw)
+        return out
+
     def evaluate_table(
         self,
         data: Any,
@@ -788,6 +832,10 @@ class Client(_Base):
         split = "time-ordered" if time_col else ("grouped" if groups is not None else "shuffled")
         drop = [groups] if isinstance(groups, str) else []
         parts, warns = [], []
+        full = _tabular.upload_candidate(df) if self.limits.supports("table_uploads") else None
+        base = (
+            self._upload(full) if full is not None else None
+        )  # a large table is uploaded once; each fold names its rows
         for k, (tr, te) in enumerate(_table_eval.folds(df, cv, groups, time_col, seed)):
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
@@ -801,6 +849,7 @@ class Client(_Base):
                     eval_metric=eval_metric,
                     quantiles=q,
                     seed=seed,
+                    _refs=_fold_refs(base, tr, te, target, drop),
                 )
             warns += [str(x.message) for x in w]
             parts.append((k, te, res))
@@ -882,6 +931,7 @@ class Client(_Base):
             ttl_hours,
             self.limits.max_tabular_bytes,
             extra,
+            self._refs(train=tr),
         )
         try:
             reply = self._t.request("POST", "/v1/fits", body)
@@ -1146,6 +1196,7 @@ class AsyncClient(_Base):
         groups: Optional[str] = None,
         time_col: Optional[str] = None,
         set_coverage: Optional[float] = None,
+        _refs: Optional[Dict[str, dict]] = None,
     ) -> PredictionResult:
         tr, te, pt, q, warns, extra = _tabular.prepare(
             train,
@@ -1160,8 +1211,21 @@ class AsyncClient(_Base):
             time_col=time_col,
             set_coverage=set_coverage,
         )
+        refs = _refs if _refs is not None else await self._refs(train=tr, test=te)
         body = _tabular.payload(
-            model, tr, target, te, pt, preset, eval_metric, time_limit, seed, self.limits.max_tabular_bytes, q, extra
+            model,
+            tr,
+            target,
+            te,
+            pt,
+            preset,
+            eval_metric,
+            time_limit,
+            seed,
+            self.limits.max_tabular_bytes,
+            q,
+            extra,
+            refs,
         )
         t0 = time.monotonic()
         res = _predict_result(
@@ -1193,6 +1257,27 @@ class AsyncClient(_Base):
         warn_all(res.warnings)
         return res
 
+    async def _upload(self, raw: bytes) -> dict:  # type: ignore[override]
+        sha = hashlib.sha256(raw).hexdigest()
+        if sha not in self._tables:
+            slot = await self._t.request(
+                "POST", "/v1/uploads", {"sha256": sha, "size_bytes": len(raw), "format": "parquet"}
+            )
+            if not slot.get("exists"):
+                await self._t.put_bytes(slot["upload"]["url"], raw, bool(slot["upload"].get("auth")))
+            self._tables[sha] = slot["id"]
+        return {"format": "table", "id": self._tables[sha]}
+
+    async def _refs(self, **tables: Optional[pd.DataFrame]) -> Dict[str, dict]:  # type: ignore[override]
+        if not self.limits.supports("table_uploads"):
+            return {}
+        out = {}
+        for name, df in tables.items():
+            raw = _tabular.upload_candidate(df) if df is not None else None
+            if raw is not None:
+                out[name] = await self._upload(raw)
+        return out
+
     async def evaluate_table(
         self,
         data: Any,
@@ -1218,6 +1303,8 @@ class AsyncClient(_Base):
         split = "time-ordered" if time_col else ("grouped" if groups is not None else "shuffled")
         drop = [groups] if isinstance(groups, str) else []
         splits = _table_eval.folds(df, cv, groups, time_col, seed)
+        full = _tabular.upload_candidate(df) if self.limits.supports("table_uploads") else None
+        base = await self._upload(full) if full is not None else None
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             results = await asyncio.gather(
@@ -1232,6 +1319,7 @@ class AsyncClient(_Base):
                         eval_metric=eval_metric,
                         quantiles=q,
                         seed=seed,
+                        _refs=_fold_refs(base, tr, te, target, drop),
                     )
                     for tr, te in splits
                 ]
@@ -1312,6 +1400,7 @@ class AsyncClient(_Base):
             ttl_hours,
             self.limits.max_tabular_bytes,
             extra,
+            await self._refs(train=tr),
         )
         try:
             reply = await self._t.request("POST", "/v1/fits", body)
