@@ -672,6 +672,32 @@ class Client(_Base):
         warn_all(res.warnings)
         return res
 
+    def estimate_table(
+        self,
+        train: Any = None,
+        *,
+        target: Optional[str] = None,
+        test: Any = None,
+        preset: Optional[str] = None,
+        train_rows: Optional[int] = None,
+        features: Optional[int] = None,
+        predict_rows: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Credits a tabular call will cost, before making it: a fit on `train` (rows x feature columns, times the preset's
+        folds) plus predicting `test`. Pass tables, or the counts (train_rows, features, predict_rows). Uses the rates the API
+        publishes, so it stays right when they change. -> {"fit", "predict", "total", "unit"}
+        """
+        if train is not None:
+            df = _tabular._frame(_pandas(train), "train")
+            train_rows = len(df) if train_rows is None else train_rows
+            features = (df.shape[1] - (1 if target in df.columns else 0)) if features is None else features
+        if test is not None:
+            predict_rows = len(_tabular._frame(_pandas(test), "test")) if predict_rows is None else predict_rows
+        rates = (self.limits.pricing or {}).get("tabular") or {}
+        return _tabular.estimate(
+            rates, int(train_rows or 0), int(features or 1), preset or "fast", int(predict_rows or 0)
+        )
+
     def evaluate_table(
         self,
         data: Any,

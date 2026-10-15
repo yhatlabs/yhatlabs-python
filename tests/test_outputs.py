@@ -177,3 +177,17 @@ def test_fit_group_async(aclient):
 
     g, p = asyncio.run(run())
     assert isinstance(g, AsyncFitGroup) and set(p.results) == {"cls", "y"}
+
+
+def test_estimate_table_reads_the_published_rates(client):
+    from yhatlabs import Limits, UnsupportedError
+
+    rates = {"unit": "credits", "fit_cells_per_credit": 1_000_000, "preset_multiplier": {"fast": 1, "medium": 3, "full": 8}, "predict_rows_per_credit": 10_000, "min_credits": 1}
+    client.limits = Limits(pricing={"tabular": rates})
+    df = pd.DataFrame({"a": range(100_000), "b": 1.0, "y": 0.0})
+    est = client.estimate_table(df, target="y", test=df.head(25_000), preset="medium")
+    assert est == {"fit": 3, "predict": 3, "total": 6, "unit": "credits"}  # 200k cells -> 1 x 3 folds; 25k rows -> 3
+    assert client.estimate_table(train_rows=200_000, features=100, preset="full")["fit"] == 160
+    client.limits = Limits()
+    with pytest.raises(UnsupportedError):
+        client.estimate_table(train_rows=10)

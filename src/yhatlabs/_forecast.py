@@ -38,6 +38,9 @@ class Limits:
     capabilities: Dict[str, Any] = field(
         default_factory=dict
     )  # features the API has switched on; a missing flag means off
+    pricing: Dict[str, Any] = field(
+        default_factory=dict
+    )  # what calls cost, as the API publishes it (estimate_table reads it)
 
     @classmethod
     def from_api(cls, lim: dict) -> Limits:
@@ -52,6 +55,7 @@ class Limits:
             max_tabular_bytes=t.get("max_bytes", d.max_tabular_bytes),
             max_columns=f.get("max_columns", d.max_columns),
             capabilities=dict(lim.get("capabilities") or {}),
+            pricing=dict(lim.get("pricing") or {}),
         )
 
     def supports(self, feature: str) -> bool:

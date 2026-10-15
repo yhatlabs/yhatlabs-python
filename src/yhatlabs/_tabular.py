@@ -351,3 +351,16 @@ def parse(
             np.asarray(reply["quantiles"], dtype=float), index=test.index, columns=[qname(lv) for lv in levels]
         )
     return out, None, None, q
+
+
+def estimate(rates: Dict[str, Any], train_rows: int, features: int, preset: str, predict_rows: int) -> Dict[str, Any]:
+    """Credits of a fit and a prediction under the API's published rates (GET /v1/limits, pricing.tabular)."""
+    if not rates:
+        raise UnsupportedError(
+            "This API publishes no tabular pricing; the estimate needs GET /v1/limits to include it."
+        )
+    lo = int(rates.get("min_credits", 1))
+    mult = (rates.get("preset_multiplier") or {}).get(preset, 1)
+    fit = max(lo, math.ceil(train_rows * max(1, features) / rates["fit_cells_per_credit"])) * mult if train_rows else 0
+    pred = max(lo, math.ceil(predict_rows / rates["predict_rows_per_credit"])) if predict_rows else 0
+    return {"fit": fit, "predict": pred, "total": fit + pred, "unit": rates.get("unit", "credits")}
