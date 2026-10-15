@@ -182,7 +182,13 @@ def test_fit_group_async(aclient):
 def test_estimate_table_reads_the_published_rates(client):
     from yhatlabs import Limits, UnsupportedError
 
-    rates = {"unit": "credits", "fit_cells_per_credit": 1_000_000, "preset_multiplier": {"fast": 1, "medium": 3, "full": 8}, "predict_rows_per_credit": 10_000, "min_credits": 1}
+    rates = {
+        "unit": "credits",
+        "fit_cells_per_credit": 1_000_000,
+        "preset_multiplier": {"fast": 1, "medium": 3, "full": 8},
+        "predict_rows_per_credit": 10_000,
+        "min_credits": 1,
+    }
     client.limits = Limits(pricing={"tabular": rates})
     df = pd.DataFrame({"a": range(100_000), "b": 1.0, "y": 0.0})
     est = client.estimate_table(df, target="y", test=df.head(25_000), preset="medium")
@@ -191,3 +197,25 @@ def test_estimate_table_reads_the_published_rates(client):
     client.limits = Limits()
     with pytest.raises(UnsupportedError):
         client.estimate_table(train_rows=10)
+
+
+def test_groups_time_col_and_prediction_sets(client, api):
+    df = _table().drop(columns=["y"])
+    test = df.drop(columns=["cls", "machine"]).head(3)  # the groups column is not a feature: test may lack it
+    res = client.predict(df, "cls", test=test, groups="machine", set_coverage=0.9)
+    body = [r for r in api.requests if r[1] == "/v1/tabular/predict"][-1][2]
+    assert body["groups"] == "machine" and body["set_coverage"] == 0.9 and "machine" not in body["test"][0]
+    assert res.set_coverage == 0.9 and res.prediction_sets.tolist() == [[0, 1]] * 3  # labels in their own type
+    assert "prediction_set" in res.df.columns
+    client.predict(df.drop(columns="machine"), "cls", test=test, time_col="t")  # time_col stays a feature
+    assert [r for r in api.requests if r[1] == "/v1/tabular/predict"][-1][2]["time_col"] == "t"
+    with pytest.raises(DataError, match="not both"):
+        client.predict(df, "cls", test=test, groups="machine", time_col="t")
+    with pytest.raises(DataError, match="must name a column"):
+        client.predict(df, "cls", test=test, groups="nope")
+    with pytest.raises(DataError, match="classification"):
+        client.predict(_table().drop(columns="cls"), "y", test=test, task="regress", set_coverage=0.9)
+    m = client.fit(df, "cls", groups="machine")
+    assert [r for r in api.requests if r[1] == "/v1/fits"][-1][2]["groups"] == "machine"
+    assert "machine" not in m.features
+    assert m.predict(test, set_coverage=0.8).set_coverage == 0.8

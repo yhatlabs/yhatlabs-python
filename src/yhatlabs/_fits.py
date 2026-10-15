@@ -143,18 +143,24 @@ class FittedModel:
         res = PredictionResult(
             preds, self.model, proba, classes, self.fit, warns, reply.get("id"), reply.get("usage") or {}, q, self.id
         )
+        res.prediction_sets, res.set_coverage = _tabular.parse_sets(reply, te, self.labels), reply.get("set_coverage")
+        res.interval_method = reply.get("interval_method")
         warn_all(res.warnings)
         res.timing = {"total_s": round(elapsed, 3), "restored": bool(reply.get("restored"))}
         res.checks = _profile.Checks(self.profile, te) if self.profile else None
         return res
 
-    def predict(self, test: Any, *, quantiles: Any = None) -> PredictionResult:
-        """Score rows with this fit. quantiles: regression only, any levels in (0, 1), e.g. [0.05, 0.5, 0.95]."""
+    def predict(self, test: Any, *, quantiles: Any = None, set_coverage: Optional[float] = None) -> PredictionResult:
+        """Score rows with this fit. quantiles: regression only, any levels in (0, 1), e.g. [0.05, 0.5, 0.95].
+        set_coverage: classification only, e.g. 0.9: res.prediction_sets holds, per row, the classes that together contain the
+        true one for 90% of new rows like the training ones (one class when the model is sure, several when it is not).
+        """
         c = self._c()
         te, q, warns = self._test(test, quantiles, c.limits)
+        cov = _tabular.check_coverage(set_coverage, self.problem_type)
         t0 = time.monotonic()
         reply = c._t.request(
-            "POST", f"/v1/fits/{self.id}/predict", _tabular.test_payload(te, q, c.limits.max_tabular_bytes)
+            "POST", f"/v1/fits/{self.id}/predict", _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov)
         )
         return self._result(reply, te, warns, bool(q), time.monotonic() - t0)
 
@@ -205,12 +211,15 @@ class FittedModel:
 
 
 class AsyncFittedModel(FittedModel):
-    async def predict(self, test: Any, *, quantiles: Any = None) -> PredictionResult:  # type: ignore[override]
+    async def predict(  # type: ignore[override]
+        self, test: Any, *, quantiles: Any = None, set_coverage: Optional[float] = None
+    ) -> PredictionResult:
         c = self._c()
         te, q, warns = self._test(test, quantiles, c.limits)
+        cov = _tabular.check_coverage(set_coverage, self.problem_type)
         t0 = time.monotonic()
         reply = await c._t.request(
-            "POST", f"/v1/fits/{self.id}/predict", _tabular.test_payload(te, q, c.limits.max_tabular_bytes)
+            "POST", f"/v1/fits/{self.id}/predict", _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov)
         )
         return self._result(reply, te, warns, bool(q), time.monotonic() - t0)
 

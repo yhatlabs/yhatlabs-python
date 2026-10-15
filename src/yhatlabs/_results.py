@@ -188,6 +188,9 @@ class PredictionResult:
         default_factory=dict
     )  # seconds: total (client side) plus the server's fit / predict split
     checks: Any = field(default=None, repr=False, compare=False)  # _profile.Checks against the training table
+    prediction_sets: Optional[pd.Series] = None  # classification with set_coverage=: the classes per row (a list)
+    set_coverage: Optional[float] = None
+    interval_method: Optional[str] = None  # how regression quantiles were made: "distribution" (per row) or "conformal"
 
     @property
     def out_of_range(self) -> Optional[pd.Series]:
@@ -246,6 +249,8 @@ class PredictionResult:
             out = out.join(self.probabilities.add_prefix("p_"))
         if self.quantiles is not None:
             out = out.join(self.quantiles)
+        if self.prediction_sets is not None:
+            out = out.join(self.prediction_sets)
         return out
 
 

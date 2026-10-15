@@ -189,6 +189,54 @@ def prepare_test(test: Any, features: List[str], target: str, limits: Limits) ->
     return test[features], warns
 
 
+def split_options(
+    train: pd.DataFrame,
+    target: str,
+    groups: Optional[str],
+    time_col: Optional[str],
+    set_coverage: Any,
+    pt: Optional[str],
+) -> Dict[str, Any]:
+    """groups= / time_col= (validation folds that hold out whole groups or periods) and set_coverage= (classification
+    prediction sets), checked against the training table; -> the request fields.
+    """
+    out: Dict[str, Any] = {}
+    if groups is not None and time_col is not None:
+        raise DataError("Pass groups= or time_col=, not both.")
+    for name, col in (("groups", groups), ("time_col", time_col)):
+        if col is None:
+            continue
+        if not isinstance(col, str) or col not in train.columns:
+            raise DataError(f"{name}={col!r} must name a column of train. Columns: {list(train.columns)}")
+        if col == target:
+            raise DataError(f"{name} cannot be the target.")
+        out[name] = col
+    if groups is not None:
+        if train[groups].isna().any():
+            raise DataError(f"groups column {groups!r} has missing values; every row needs its group.")
+        if train[groups].nunique() < 2:
+            raise DataError(f"groups column {groups!r} needs at least 2 groups.")
+    cov = check_coverage(set_coverage, pt)
+    if cov is not None:
+        out["set_coverage"] = cov
+    return out
+
+
+def check_coverage(set_coverage: Any, pt: Optional[str]) -> Optional[float]:
+    if set_coverage is None:
+        return None
+    if isinstance(set_coverage, bool) or not isinstance(set_coverage, (int, float)) or not 0 < float(set_coverage) < 1:
+        raise DataError("set_coverage must be a number strictly between 0 and 1, e.g. 0.9.")
+    if pt == "regression":
+        raise DataError("set_coverage= applies to classification; for regression use quantiles=.")
+    return float(set_coverage)
+
+
+def features_of(train: pd.DataFrame, target: str, groups: Optional[str] = None) -> List[str]:
+    """The feature columns: everything but the target, and but the groups column (a group id is not used as a feature)."""
+    return [c for c in train.columns if c != target and c != groups]
+
+
 def prepare(
     train: Any,
     target: str,
@@ -199,8 +247,11 @@ def prepare(
     quantiles: Any,
     limits: Limits,
     eval_metric: Optional[str] = None,
-) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[str], Optional[List[float]], List[str]]:
-    """One-shot fit-and-predict inputs; returns (train, test, problem_type, quantile levels, warnings)."""
+    groups: Optional[str] = None,
+    time_col: Optional[str] = None,
+    set_coverage: Any = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[str], Optional[List[float]], List[str], Dict[str, Any]]:
+    """One-shot fit-and-predict inputs; returns (train, test, problem_type, quantile levels, warnings, extra request fields)."""
     check_options(preset, eval_metric)
     if test is None:
         full = _str_columns(_frame(train, "train"), "train")
@@ -213,8 +264,9 @@ def prepare(
             )
         train, test = full[~missing], full[missing].drop(columns=[target])
     tr, pt, warns = prepare_train(train, target, task=task, limits=limits)
-    te, w2 = prepare_test(test, [c for c in tr.columns if c != target], target, limits)
-    return tr, te, pt, check_quantiles(quantiles, pt), warns + w2
+    extra = split_options(tr, target, groups, time_col, set_coverage, pt)
+    te, w2 = prepare_test(test, features_of(tr, target, groups), target, limits)
+    return tr, te, pt, check_quantiles(quantiles, pt), warns + w2, extra
 
 
 def _check_size(sizes: List[float], parquet: bool, max_bytes: Optional[int]) -> None:
@@ -259,6 +311,7 @@ def payload(
     seed: Optional[int] = None,
     max_bytes: Optional[int] = None,
     quantiles: Optional[List[float]] = None,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> dict:
     tr, tr_size = encode_table(train)
     te, te_size = encode_table(test)
@@ -268,6 +321,7 @@ def payload(
     )
     if quantiles:
         body["quantiles"] = quantiles
+    body.update(extra or {})
     return body
 
 
@@ -282,22 +336,35 @@ def fit_payload(
     seed: Optional[int],
     ttl_hours: Optional[float],
     max_bytes: Optional[int],
+    extra: Optional[Dict[str, Any]] = None,
 ) -> dict:
     tr, size = encode_table(train)
     _check_size([size], isinstance(tr, dict), max_bytes)
     body = _options({"model": model, "target": target, "train": tr}, pt, preset, eval_metric, time_limit, seed)
     if ttl_hours is not None:
         body["ttl_hours"] = float(ttl_hours)
+    body.update(extra or {})
     return body
 
 
-def test_payload(test: pd.DataFrame, quantiles: Optional[List[float]], max_bytes: Optional[int]) -> dict:
+def test_payload(
+    test: pd.DataFrame, quantiles: Optional[List[float]], max_bytes: Optional[int], set_coverage: Optional[float] = None
+) -> dict:
     te, size = encode_table(test)
     _check_size([size], isinstance(te, dict), max_bytes)
     body: dict = {"test": te}
     if quantiles:
         body["quantiles"] = quantiles
+    if set_coverage is not None:
+        body["set_coverage"] = float(set_coverage)
     return body
+
+
+def parse_sets(reply: dict, test: pd.DataFrame, labels: List[Any]) -> Optional[pd.Series]:
+    sets = reply.get("prediction_sets")
+    if sets is None:
+        return None
+    return pd.Series([_restore_labels(list(s), labels) for s in sets], index=test.index, name="prediction_set")
 
 
 def _key(v: Any) -> str:

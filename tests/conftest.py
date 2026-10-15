@@ -143,7 +143,7 @@ class FakeAPI:
                 },
             )
         if parts[3] == "predict":
-            r = self.tabular(fb["train"], body["test"], fb["target"], {**fb, "quantiles": body.get("quantiles")})
+            r = self.tabular(fb["train"], body["test"], fb["target"], {**fb, "quantiles": body.get("quantiles"), "set_coverage": body.get("set_coverage")})
             j = json.loads(r.content)
             j.pop("fit", None)
             j["fit_id"] = fid
@@ -199,18 +199,18 @@ class FakeAPI:
         classes = sorted({str(y) for y in ys})
         counts = [sum(str(y) == c for y in ys) / len(ys) for c in classes]
         top = classes[int(np.argmax(counts))]
-        return httpx.Response(
-            200,
-            json={
-                "id": "req_tab",
-                "model": body.get("model"),
-                "predictions": [top] * n,
-                "probabilities": [counts] * n,
-                "classes": classes,
-                "fit": fit,
-                "usage": {"rows": n},
-            },
-        )
+        out = {
+            "id": "req_tab",
+            "model": body.get("model"),
+            "predictions": [top] * n,
+            "probabilities": [counts] * n,
+            "classes": classes,
+            "fit": fit,
+            "usage": {"rows": n},
+        }
+        if body.get("set_coverage"):
+            out.update(prediction_sets=[classes] * n, set_coverage=body["set_coverage"])
+        return httpx.Response(200, json=out)
 
 
 @pytest.fixture(autouse=True)

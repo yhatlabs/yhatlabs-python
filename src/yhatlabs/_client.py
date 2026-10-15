@@ -138,6 +138,8 @@ def _predict_result(
     preds, proba, classes, q = _tabular.parse(reply, test, labels, want_q)
     fit = reply.get("fit") or {}
     res = PredictionResult(preds, model, proba, classes, fit, warns, reply.get("id"), reply.get("usage") or {}, q)
+    res.prediction_sets, res.set_coverage = _tabular.parse_sets(reply, test, labels), reply.get("set_coverage")
+    res.interval_method = reply.get("interval_method")
     res.timing = {k: fit[k] for k in ("fit_s", "predict_s") if fit.get(k) is not None}
     return res
 
@@ -617,6 +619,9 @@ class Client(_Base):
         time_limit: Optional[float] = None,
         quantiles: Any = None,
         seed: Optional[int] = None,
+        groups: Optional[str] = None,
+        time_col: Optional[str] = None,
+        set_coverage: Optional[float] = None,
     ) -> PredictionResult:
         """Fit on `train` and predict `test` in one call (nothing is kept; to predict again from the same fit, use fit()).
 
@@ -629,7 +634,7 @@ class Client(_Base):
         e.g. [0.05, 0.5, 0.95] (split-conformal on out-of-sample errors). time_limit: seconds for the whole call. seed: the
         server uses 0 when omitted, so results are already reproducible.
         """
-        tr, te, pt, q, warns = _tabular.prepare(
+        tr, te, pt, q, warns, extra = _tabular.prepare(
             train,
             target,
             test,
@@ -638,9 +643,12 @@ class Client(_Base):
             quantiles=quantiles,
             limits=self.limits,
             eval_metric=eval_metric,
+            groups=groups,
+            time_col=time_col,
+            set_coverage=set_coverage,
         )
         body = _tabular.payload(
-            model, tr, target, te, pt, preset, eval_metric, time_limit, seed, self.limits.max_tabular_bytes, q
+            model, tr, target, te, pt, preset, eval_metric, time_limit, seed, self.limits.max_tabular_bytes, q, extra
         )
         t0 = time.monotonic()
         res = _predict_result(
@@ -652,7 +660,7 @@ class Client(_Base):
             bool(q),
         )
         res.timing["total_s"] = round(time.monotonic() - t0, 3)
-        res.checks = _profile.Checks(_profile.build(tr, [c for c in tr.columns if c != target]), te)
+        res.checks = _profile.Checks(_profile.build(tr, _tabular.features_of(tr, target, groups)), te)
         res.provenance = _provenance(
             self.base_url,
             "/v1/tabular/predict",
@@ -765,6 +773,8 @@ class Client(_Base):
         seed: Optional[int] = None,
         ttl_hours: Optional[float] = None,
         profile: bool = True,
+        groups: Optional[str] = None,
+        time_col: Optional[str] = None,
     ) -> Union[FittedModel, FitGroup]:
         """Fit once on our side and get a handle to predict (with intervals for regression) and explain as often as you like;
         each prediction sends only the rows to score. The fit is kept for ttl_hours (default 24, at most 168) or until
@@ -784,6 +794,8 @@ class Client(_Base):
                 seed=seed,
                 ttl_hours=ttl_hours,
                 profile=profile,
+                groups=groups,
+                time_col=time_col,
             )
             frame = _tabular._frame(_pandas(train), "train")
             made: Dict[str, FittedModel] = {}
@@ -808,8 +820,19 @@ class Client(_Base):
             return FitGroup(dict(zip(targets, fits)))
         _tabular.check_options(preset, eval_metric)
         tr, pt, warns = _tabular.prepare_train(train, target, task=task, limits=self.limits)
+        extra = _tabular.split_options(tr, target, groups, time_col, None, pt)
         body = _tabular.fit_payload(
-            model, tr, target, pt, preset, eval_metric, time_limit, seed, ttl_hours, self.limits.max_tabular_bytes
+            model,
+            tr,
+            target,
+            pt,
+            preset,
+            eval_metric,
+            time_limit,
+            seed,
+            ttl_hours,
+            self.limits.max_tabular_bytes,
+            extra,
         )
         try:
             reply = self._t.request("POST", "/v1/fits", body)
@@ -819,7 +842,7 @@ class Client(_Base):
             raise
         warn_all(warns)
         fm = FittedModel.from_reply(
-            reply, [c for c in tr.columns if c != target], _tabular.label_values(tr[target]), self
+            reply, _tabular.features_of(tr, target, groups), _tabular.label_values(tr[target]), self
         )
         fm.profile = _profile.build(tr, fm.features or []) if profile else None
         return fm
@@ -1060,8 +1083,11 @@ class AsyncClient(_Base):
         time_limit: Optional[float] = None,
         quantiles: Any = None,
         seed: Optional[int] = None,
+        groups: Optional[str] = None,
+        time_col: Optional[str] = None,
+        set_coverage: Optional[float] = None,
     ) -> PredictionResult:
-        tr, te, pt, q, warns = _tabular.prepare(
+        tr, te, pt, q, warns, extra = _tabular.prepare(
             train,
             target,
             test,
@@ -1070,9 +1096,12 @@ class AsyncClient(_Base):
             quantiles=quantiles,
             limits=self.limits,
             eval_metric=eval_metric,
+            groups=groups,
+            time_col=time_col,
+            set_coverage=set_coverage,
         )
         body = _tabular.payload(
-            model, tr, target, te, pt, preset, eval_metric, time_limit, seed, self.limits.max_tabular_bytes, q
+            model, tr, target, te, pt, preset, eval_metric, time_limit, seed, self.limits.max_tabular_bytes, q, extra
         )
         t0 = time.monotonic()
         res = _predict_result(
@@ -1084,7 +1113,7 @@ class AsyncClient(_Base):
             bool(q),
         )
         res.timing["total_s"] = round(time.monotonic() - t0, 3)
-        res.checks = _profile.Checks(_profile.build(tr, [c for c in tr.columns if c != target]), te)
+        res.checks = _profile.Checks(_profile.build(tr, _tabular.features_of(tr, target, groups)), te)
         res.provenance = _provenance(
             self.base_url,
             "/v1/tabular/predict",
@@ -1172,6 +1201,8 @@ class AsyncClient(_Base):
         seed: Optional[int] = None,
         ttl_hours: Optional[float] = None,
         profile: bool = True,
+        groups: Optional[str] = None,
+        time_col: Optional[str] = None,
     ) -> Union[AsyncFittedModel, AsyncFitGroup]:
         if not isinstance(target, str):
             targets = _targets(target, train)
@@ -1183,6 +1214,8 @@ class AsyncClient(_Base):
                 seed=seed,
                 ttl_hours=ttl_hours,
                 profile=profile,
+                groups=groups,
+                time_col=time_col,
             )
             frame = _tabular._frame(_pandas(train), "train")
             outs = await asyncio.gather(
@@ -1206,8 +1239,19 @@ class AsyncClient(_Base):
             return AsyncFitGroup(dict(zip(targets, outs)))  # type: ignore[arg-type]
         _tabular.check_options(preset, eval_metric)
         tr, pt, warns = _tabular.prepare_train(train, target, task=task, limits=self.limits)
+        extra = _tabular.split_options(tr, target, groups, time_col, None, pt)
         body = _tabular.fit_payload(
-            model, tr, target, pt, preset, eval_metric, time_limit, seed, ttl_hours, self.limits.max_tabular_bytes
+            model,
+            tr,
+            target,
+            pt,
+            preset,
+            eval_metric,
+            time_limit,
+            seed,
+            ttl_hours,
+            self.limits.max_tabular_bytes,
+            extra,
         )
         try:
             reply = await self._t.request("POST", "/v1/fits", body)
@@ -1217,7 +1261,7 @@ class AsyncClient(_Base):
             raise
         warn_all(warns)
         fm = FittedModel.from_reply(
-            reply, [c for c in tr.columns if c != target], _tabular.label_values(tr[target]), self
+            reply, _tabular.features_of(tr, target, groups), _tabular.label_values(tr[target]), self
         )
         fm.profile = _profile.build(tr, fm.features or []) if profile else None
         return AsyncFittedModel(**{k: getattr(fm, k) for k in fm.__dataclass_fields__})
