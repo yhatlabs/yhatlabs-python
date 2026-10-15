@@ -18,6 +18,24 @@
 - Every POST carries an `Idempotency-Key` header that stays the same across its retries, so the API can recognise a retry.
 - `Limits` has `max_columns` and `capabilities`, read from `/v1/limits`. `limits.supports(name)` tells whether the API has
   switched a feature on.
+- Forecasts:
+  - `forecast(..., mean=True)` adds a `mean` column, computed from the quantiles (listed in `derived`). Use it when forecasts
+    are summed later; the median stays the point forecast.
+  - `fc.intervals(80)` returns `lower_80` / `upper_80` next to the median; `fc.to_wide()` gives one column per series.
+  - `fc.prob(above=limit)` / `fc.prob(below=limit)`: the chance of crossing a limit at each step.
+- Tables:
+  - `yh.evaluate_table(df, target, cv=5, groups=..., time_col=...)` cross-validates on your data: shuffled, grouped (a group
+    never sits on both sides) or time-ordered folds. It reports accuracy, log loss, AUC, Brier and calibration error with a
+    reliability table, or MAE, RMSE, R2, CRPS, coverage per interval and a PIT histogram.
+  - Predictions carry `out_of_range` (columns outside the training range, or unseen categories) and `novelty` (how far a row
+    is from the training rows, as a percentile). Fits keep a training profile for this (`fit(..., profile=False)` drops it);
+    it is saved with `.save()`.
+  - `res.prob(above=limit)` on regression predictions with intervals.
+  - `model.effect(col)`: how the prediction moves as one column varies (partial dependence, with the spread across rows).
+  - `yh.fit(train, target=["a", "b"])` fits each target on the features alone and returns a `FitGroup`; its `predict`,
+    `importance`, `effect`, `save` and `delete` cover every target.
+- Plots: `yhatlabs.plots` has forecast (nested interval bands), backtest, anomalies, scenarios, calibration, reliability,
+  predicted against actual, importance and effect. `EvaluationResult.plot()` and `TableEvaluation.plot()` use them.
 
 ## 0.1.1 (2026-10-15)
 

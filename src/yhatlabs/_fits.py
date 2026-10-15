@@ -12,11 +12,12 @@ import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import pandas as pd
 
-from . import _tabular
+from . import _profile, _tabular
 from ._errors import ConfigurationError, DataError, NotFoundError, UnsupportedError
 from ._forecast import Limits, warn_all
 from ._results import PredictionResult
@@ -45,6 +46,9 @@ class FittedModel:
     features: Optional[List[str]] = None
     labels: List[Any] = field(default_factory=list)
     _client: Any = field(default=None, repr=False, compare=False)
+    profile: Optional[Dict[str, Any]] = field(
+        default=None, repr=False
+    )  # the training table's ranges and a row sample (_profile)
 
     @classmethod
     def from_reply(cls, reply: dict, features: Optional[List[str]], labels: List[Any], client: Any) -> FittedModel:
@@ -68,8 +72,10 @@ class FittedModel:
         )
 
     def save(self, path: Any = None) -> Dict[str, Any]:
-        """Writes the fit's record (no training data: the fit lives on our side) to `path` as JSON, and returns it. Load it
-        later, in another process or on another machine, with yhatlabs.load(path).
+        """Writes the fit's record to `path` as JSON, and returns it. Load it later, in another process or on another machine,
+        with yhatlabs.load(path). The fit itself lives on our side; the record holds the training profile (column ranges,
+        categories and a sample of at most 2,000 training rows, for out_of_range and novelty) unless the fit was made with
+        profile=False.
         """
         rec = {
             "format": RECORD_FORMAT,
@@ -86,6 +92,7 @@ class FittedModel:
             "created_at": self.created_at,
             "expires_at": self.expires_at,
             "intervals": self.intervals,
+            "profile": self.profile,
         }
         if path is not None:
             Path(path).write_text(json.dumps(rec, indent=2, default=str))
@@ -138,6 +145,7 @@ class FittedModel:
         )
         warn_all(res.warnings)
         res.timing = {"total_s": round(elapsed, 3), "restored": bool(reply.get("restored"))}
+        res.checks = _profile.Checks(self.profile, te) if self.profile else None
         return res
 
     def predict(self, test: Any, *, quantiles: Any = None) -> PredictionResult:
@@ -176,6 +184,18 @@ class FittedModel:
                 _importance_body(data, subsample_size, num_shuffle_sets, time_limit),
             )
         )
+
+    def effect(self, col: str, *, grid: Any = 20, data: Any = None, rows: int = 200, seed: int = 0) -> pd.DataFrame:
+        """How the prediction moves as one column varies, everything else as in real rows (partial dependence).
+
+        Takes `rows` rows (from data=, else the training sample kept on this handle), sets `col` to each grid value in turn
+        and predicts them all in one call: `average` is the mean prediction (class probability for classification, one curve
+        per class in `output`), `low` / `high` the 10th and 90th percentile across rows, which shows whether the effect is the
+        same everywhere. grid: a number of points (quantiles of the column; categories by frequency) or the values themselves.
+        Cost: rows x grid predicted rows (200 x 20 = 4,000 by default). Plot it with yhatlabs.plots.effect().
+        """
+        stacked, values = _effect_rows(self, col, grid, data, rows, seed)
+        return _effect_frame(self.predict(stacked), col, values, len(stacked) // len(values))
 
     def delete(self) -> None:
         self._c()._t.request("DELETE", f"/v1/fits/{self.id}")
@@ -217,6 +237,12 @@ class AsyncFittedModel(FittedModel):
             )
         )
 
+    async def effect(
+        self, col: str, *, grid: Any = 20, data: Any = None, rows: int = 200, seed: int = 0
+    ) -> pd.DataFrame:  # type: ignore[override]
+        stacked, values = _effect_rows(self, col, grid, data, rows, seed)
+        return _effect_frame(await self.predict(stacked), col, values, len(stacked) // len(values))
+
     async def delete(self) -> None:  # type: ignore[override]
         await self._c()._t.request("DELETE", f"/v1/fits/{self.id}")
 
@@ -224,6 +250,208 @@ class AsyncFittedModel(FittedModel):
         return await self._c()._t.request("GET", f"/v1/fits/{self.id}")
 
     async def __aenter__(self) -> AsyncFittedModel:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self.delete()
+
+
+def _effect_rows(fm: FittedModel, col: str, grid: Any, data: Any, rows: int, seed: int) -> Tuple[pd.DataFrame, list]:
+    """The stacked copies to predict for an effect curve, and the grid values."""
+    if data is not None:
+        base = _tabular._str_columns(_tabular._frame(data, "data"), "data").drop(columns=[fm.target], errors="ignore")
+    elif fm.profile:
+        base = pd.DataFrame(fm.profile["sample"])
+        for c in fm.features or []:
+            if c not in base.columns:
+                base[c] = None
+    else:
+        raise DataError("effect() needs data= (rows to vary) when the fit has no training profile.")
+    if col not in base.columns:
+        raise DataError(f"{col!r} is not a feature of this fit.")
+    base = base.sample(min(rows, len(base)), random_state=seed)
+    if isinstance(grid, (list, tuple, np.ndarray, pd.Series)):
+        values = list(grid)
+    else:
+        info = (fm.profile or {}).get("columns", {}).get(col)
+        s = base[col].dropna()
+        if (info or {}).get("kind") == "category" or not pd.api.types.is_numeric_dtype(s):
+            values = (info["categories"] if info else list(s.value_counts().index))[: int(grid)]
+        else:
+            values = list(np.unique(np.quantile(s.to_numpy(dtype=float), np.linspace(0.02, 0.98, int(grid)))))
+    stacked = pd.concat([base.assign(**{col: v}) for v in values], ignore_index=True)
+    return stacked, values
+
+
+def _effect_frame(res: PredictionResult, col: str, values: list, per: int) -> pd.DataFrame:
+    """Average prediction per grid value, with the 10th to 90th percentile across the varied rows."""
+    out = []
+    if res.probabilities is not None:
+        P = res.probabilities.to_numpy(dtype=float)
+        for i, v in enumerate(values):
+            block = P[i * per : (i + 1) * per]
+            for j, cls in enumerate(res.probabilities.columns):
+                out.append(
+                    {
+                        col: v,
+                        "output": cls,
+                        "average": block[:, j].mean(),
+                        "low": np.quantile(block[:, j], 0.1),
+                        "high": np.quantile(block[:, j], 0.9),
+                    }
+                )
+        frame = pd.DataFrame(out)
+        frame.attrs["ylabel"] = "probability"
+    else:
+        y = res.predictions.to_numpy(dtype=float)
+        for i, v in enumerate(values):
+            block = y[i * per : (i + 1) * per]
+            out.append(
+                {col: v, "average": block.mean(), "low": np.quantile(block, 0.1), "high": np.quantile(block, 0.9)}
+            )
+        frame = pd.DataFrame(out)
+    frame.attrs.update(rows=per, predicted_rows=per * len(values))
+    return frame
+
+
+GROUP_FORMAT = "yhatlabs.fitgroup/1"
+
+
+@dataclass
+class GroupPrediction:
+    """Predictions of a FitGroup: `results[target]` is each target's PredictionResult; `df` puts them side by side, with
+    two-level columns (target, field), so df["strength"] is that target's table.
+    """
+
+    results: Dict[str, PredictionResult]
+
+    def __getitem__(self, target: str) -> PredictionResult:
+        return self.results[target]
+
+    @property
+    def df(self) -> pd.DataFrame:
+        return pd.concat({t: r.df for t, r in self.results.items()}, axis=1)
+
+    @property
+    def out_of_range(self) -> Optional[pd.Series]:
+        return next(iter(self.results.values())).out_of_range
+
+    @property
+    def novelty(self) -> Optional[pd.Series]:
+        return next(iter(self.results.values())).novelty
+
+    def __repr__(self) -> str:
+        n = len(next(iter(self.results.values())).predictions)
+        return f"GroupPrediction(targets={list(self.results)}, rows={n})"
+
+
+@dataclass
+class FitGroup:
+    """One fit per target, from Client.fit(train, target=[...]): each target is fitted on the features only (the other targets
+    are left out), and predicted, explained and deleted together. `fits[target]` is that target's FittedModel.
+    """
+
+    fits: Dict[str, FittedModel]
+
+    @property
+    def targets(self) -> List[str]:
+        return list(self.fits)
+
+    def __getitem__(self, target: str) -> FittedModel:
+        return self.fits[target]
+
+    def __iter__(self) -> Any:
+        return iter(self.fits.items())
+
+    def __len__(self) -> int:
+        return len(self.fits)
+
+    def predict(self, test: Any, *, quantiles: Any = None) -> GroupPrediction:
+        """Every target for the same rows (one call per target); quantiles= applies to the regression targets."""
+        return GroupPrediction(
+            {
+                t: m.predict(test, quantiles=quantiles if m.problem_type == "regression" else None)
+                for t, m in self.fits.items()
+            }
+        )
+
+    def importance(self, data: Any = None, **kw: Any) -> pd.DataFrame:
+        """Permutation importance per target, stacked with a `target` column."""
+        frames = []
+        for t, m in self.fits.items():
+            d = (
+                None
+                if data is None
+                else _tabular._frame(data, "data").drop(columns=[o for o in self.fits if o != t], errors="ignore")
+            )
+            frames.append(m.importance(d, **kw).assign(target=t))
+        out = pd.concat(frames, ignore_index=True)
+        return out[["target"] + [c for c in out.columns if c != "target"]]
+
+    def effect(self, col: str, **kw: Any) -> pd.DataFrame:
+        frames = [m.effect(col, **kw).assign(target=t) for t, m in self.fits.items()]
+        out = pd.concat(frames, ignore_index=True)
+        return out[["target"] + [c for c in out.columns if c != "target"]]
+
+    def delete(self) -> None:
+        for m in self.fits.values():
+            m.delete()
+
+    def save(self, path: Any = None) -> Dict[str, Any]:
+        rec = {"format": GROUP_FORMAT, "fits": {t: m.save() for t, m in self.fits.items()}}
+        if path is not None:
+            Path(path).write_text(json.dumps(rec, indent=2, default=str))
+        return rec
+
+    def bind(self, client: Any) -> FitGroup:
+        for m in self.fits.values():
+            m.bind(client)
+        return self
+
+    def __enter__(self) -> FitGroup:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.delete()
+
+    def __repr__(self) -> str:
+        return f"FitGroup(targets={self.targets})"
+
+
+class AsyncFitGroup(FitGroup):
+    async def predict(self, test: Any, *, quantiles: Any = None) -> GroupPrediction:  # type: ignore[override]
+        import asyncio
+
+        outs = await asyncio.gather(
+            *[
+                m.predict(test, quantiles=quantiles if m.problem_type == "regression" else None)
+                for m in self.fits.values()
+            ]
+        )
+        return GroupPrediction(dict(zip(self.fits, outs)))
+
+    async def importance(self, data: Any = None, **kw: Any) -> pd.DataFrame:  # type: ignore[override]
+        frames = []
+        for t, m in self.fits.items():
+            d = (
+                None
+                if data is None
+                else _tabular._frame(data, "data").drop(columns=[o for o in self.fits if o != t], errors="ignore")
+            )
+            frames.append((await m.importance(d, **kw)).assign(target=t))
+        out = pd.concat(frames, ignore_index=True)
+        return out[["target"] + [c for c in out.columns if c != "target"]]
+
+    async def effect(self, col: str, **kw: Any) -> pd.DataFrame:  # type: ignore[override]
+        frames = [(await m.effect(col, **kw)).assign(target=t) for t, m in self.fits.items()]
+        out = pd.concat(frames, ignore_index=True)
+        return out[["target"] + [c for c in out.columns if c != "target"]]
+
+    async def delete(self) -> None:  # type: ignore[override]
+        for m in self.fits.values():
+            await m.delete()
+
+    async def __aenter__(self) -> AsyncFitGroup:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -252,10 +480,16 @@ def _importance(reply: dict) -> pd.DataFrame:
 
 
 def load(source: Union[str, Path, Dict[str, Any]], client: Any = None) -> FittedModel:
-    """A fitted model from a record written by FittedModel.save(), attached to `client` (default: a new Client()). Makes no
-    request; if the fit has expired or been deleted, its first predict raises NotFoundError.
+    """A fitted model from a record written by FittedModel.save() (or a FitGroup from FitGroup.save()), attached to `client`
+    (default: a new Client()). Makes no request; if the fit has expired or been deleted, its first predict raises NotFoundError.
     """
     rec = source if isinstance(source, dict) else json.loads(Path(source).read_text())
+    if rec.get("format") == GROUP_FORMAT:
+        if client is None:
+            from ._client import Client
+
+            client = Client(base_url=next(iter(rec["fits"].values())).get("base_url"))
+        return FitGroup({t: load(r, client) for t, r in rec["fits"].items()})  # type: ignore[return-value]
     if rec.get("format") != RECORD_FORMAT:
         raise DataError(f"Not a yhatlabs fit record (format {rec.get('format')!r}, expected {RECORD_FORMAT!r}).")
     if client is None:
@@ -277,6 +511,7 @@ def load(source: Union[str, Path, Dict[str, Any]], client: Any = None) -> Fitted
         rec.get("features"),
         rec.get("labels") or [],
         client,
+        rec.get("profile"),
     )
     if fm.expired:
         warnings.warn(

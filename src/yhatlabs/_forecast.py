@@ -524,18 +524,59 @@ def _interp(qs: np.ndarray, native: np.ndarray, levels: Sequence[float]) -> np.n
     return np.stack([np.array([np.interp(lv, native, row) for lv in levels]) for row in qs])
 
 
+def mean_from_quantiles(qs: np.ndarray, native: np.ndarray) -> np.ndarray:
+    """The mean is the integral of the quantile function over (0, 1): linear between the native levels, and an exponential tail
+    beyond the outermost ones, its scale read from the outermost pair (a skewed forecast's mean moves toward its long tail).
+    Checked on deciles: exact on symmetric shapes, within 1% on gamma and exponential, 6% low on a lognormal with sigma 1.
+    qs: [h, n_native] sorted per row -> [h].
+    """
+    u = np.asarray(native, dtype=float)
+    mid = ((qs[:, 1:] + qs[:, :-1]) / 2 * np.diff(u)).sum(axis=1)
+    b_lo = (qs[:, 1] - qs[:, 0]) / np.log(u[1] / u[0])
+    b_hi = (qs[:, -1] - qs[:, -2]) / np.log((1 - u[-2]) / (1 - u[-1]))
+    return mid + u[0] * (qs[:, 0] - b_lo) + (1 - u[-1]) * (qs[:, -1] + b_hi)
+
+
+def cdf_at(qs: np.ndarray, levels: Sequence[float], x: np.ndarray) -> np.ndarray:
+    """P(Y <= x) per row from that row's quantiles: linear between the levels, the same exponential tails as
+    mean_from_quantiles beyond the outermost ones. qs: [n, k] (sorted per row), x: [n] -> [n].
+    """
+    u = np.asarray(levels, dtype=float)
+    qs = np.sort(np.asarray(qs, dtype=float), axis=1)
+    x = np.asarray(x, dtype=float)
+    out = np.empty(len(qs))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        b_lo = (qs[:, 1] - qs[:, 0]) / np.log(u[1] / u[0])
+        b_hi = (qs[:, -1] - qs[:, -2]) / np.log((1 - u[-2]) / (1 - u[-1]))
+        for i in range(len(qs)):
+            q, xi = qs[i], x[i]
+            if xi < q[0]:
+                out[i] = u[0] * np.exp((xi - q[0]) / b_lo[i]) if b_lo[i] > 0 else 0.0
+            elif xi > q[-1]:
+                out[i] = 1 - (1 - u[-1]) * np.exp((q[-1] - xi) / b_hi[i]) if b_hi[i] > 0 else 1.0
+            else:  # q[j-1] <= x < q[j]; on a repeated quantile (a point mass, e.g. zeros) x gets the highest level it reaches
+                j = int(np.searchsorted(q, xi, side="right"))
+                if j == len(q) or xi == q[j - 1]:
+                    out[i] = u[j - 1]
+                else:
+                    out[i] = u[j - 1] + (u[j] - u[j - 1]) * (xi - q[j - 1]) / (q[j] - q[j - 1])
+    return out
+
+
 def build_frame(
-    prep: Prepared, replies: Dict[Any, Any], native: Sequence[float], levels: Sequence[float]
+    prep: Prepared, replies: Dict[Any, Any], native: Sequence[float], levels: Sequence[float], mean: bool = False
 ) -> pd.DataFrame:
-    """replies: uid -> {'quantiles': [h][n]} or {'targets': {col: [h][n]}}."""
+    """replies: uid -> {'quantiles': [h][n]} or {'targets': {col: [h][n]}}. mean=True adds a `mean` column (mean_from_quantiles)."""
     nat = np.asarray(native, dtype=float)
     rows = []
     for it in prep.items:
         r = replies[it.uid]
         per_target = r["targets"] if "targets" in r else {prep.target_cols[0]: r["quantiles"]}
         for col, q in per_target.items():
-            arr = _interp(np.asarray(q, dtype=float), nat, levels)
-            frame = pd.DataFrame(arr, columns=[qname(lv) for lv in levels])
+            raw = np.sort(np.asarray(q, dtype=float), axis=1)
+            frame = pd.DataFrame(_interp(raw, nat, levels), columns=[qname(lv) for lv in levels])
+            if mean:
+                frame["mean"] = mean_from_quantiles(raw, nat)
             frame.insert(0, prep.time_col, it.future_times[: len(frame)])
             frame.insert(0, prep.id_col, it.uid)
             if it.multi:

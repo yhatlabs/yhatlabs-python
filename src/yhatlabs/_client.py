@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -14,11 +15,12 @@ import httpx
 import pandas as pd
 from pandas.util import hash_pandas_object
 
-from . import _anomaly, _evaluate, _tabular
+from . import _anomaly, _evaluate, _profile, _table_eval, _tabular
 from ._errors import APIError, DataError, NotFoundError, YHatError
-from ._fits import AsyncFittedModel, FittedModel, _not_deployed
-from ._forecast import Item, Limits, Prepared, batches, build_frame, prepare, resolve_quantiles, warn_all
+from ._fits import AsyncFitGroup, AsyncFittedModel, FitGroup, FittedModel, _not_deployed
+from ._forecast import Item, Limits, Prepared, _pandas, batches, build_frame, prepare, resolve_quantiles, warn_all
 from ._results import EvaluationResult, ForecastResult, PredictionResult
+from ._table_eval import TableEvaluation
 from ._transport import AsyncTransport, SyncTransport
 from ._version import __version__
 
@@ -78,6 +80,17 @@ def _levels(quantiles: Any, level: Optional[Sequence[float]]) -> Any:
     return sorted(out)
 
 
+def _targets(target: Sequence[str], train: Any) -> List[str]:
+    targets = list(target)
+    if not targets or len(set(targets)) != len(targets) or not all(isinstance(t, str) for t in targets):
+        raise DataError("target must be a column name or a list of distinct column names.")
+    cols = set(map(str, _tabular._frame(_pandas(train), "train").columns))
+    missing = [t for t in targets if t not in cols]
+    if missing:
+        raise DataError(f"targets {missing} are not columns of train.")
+    return targets
+
+
 def _forecast_result(
     prep: Prepared,
     model: str,
@@ -86,11 +99,14 @@ def _forecast_result(
     outs: List[Optional[dict]],
     replies: List[dict],
     errors: List[Dict[str, Any]],
+    mean: bool = False,
 ) -> ForecastResult:
     if not replies:
         raise errors[0]["exception"]
     native = _native(replies)
     levels, derived = resolve_quantiles(quantiles, native)
+    if mean:
+        derived = derived + ["mean"]
     kept = Prepared(
         [it for it, o in zip(items, outs) if o is not None],
         prep.freq,
@@ -99,7 +115,7 @@ def _forecast_result(
         prep.target_cols,
         prep.warnings,
     )
-    frame = build_frame(kept, {it.uid: o for it, o in zip(items, outs) if o is not None}, native, levels)
+    frame = build_frame(kept, {it.uid: o for it, o in zip(items, outs) if o is not None}, native, levels, mean)
     usage = {"series": sum(int((r.get("usage") or {}).get("series", 0)) for r in replies), "requests": len(replies)}
     warns = list(prep.warnings) + [f"{len(e['ids'])} series failed ({e['error']}); see result.errors." for e in errors]
     return ForecastResult(
@@ -354,6 +370,7 @@ class Client(_Base):
         model: str = DEFAULT_TS_MODEL,
         quantiles: Any = None,
         level: Optional[Sequence[float]] = None,
+        mean: bool = False,
         freq: Optional[str] = None,
         id_col: Optional[str] = None,
         time_col: Optional[str] = None,
@@ -370,6 +387,8 @@ class Client(_Base):
 
         data: long DataFrame (id, timestamp, target[s], covariates), a Series with a DatetimeIndex, an array, or a dict of arrays
         (arrays need freq=). quantiles: levels in [0.1, 0.9] (default 0.1, 0.5, 0.9) or "all"; or level=[80] for central intervals.
+        mean=True adds a `mean` column next to the median (the point forecast), computed from the native quantiles and listed in
+        result.derived; use it when the quantity is summed later (totals over time or series), where the median is biased.
         known: columns whose future values you know (pass them in `future`, see yhatlabs.features.make_future); past: history-only
         columns; static: per-series constants (region, store size). on_error="warn" returns the series that succeeded when some
         batches fail (failures in result.errors). calendar=True adds hour / weekday / month / weekend as known covariates, with
@@ -393,7 +412,7 @@ class Client(_Base):
             future=future,
         )
         out, replies, errors = self._send(prep.items, h, prep.freq, model, season, on_error)
-        res = _forecast_result(prep, model, quantiles, prep.items, out, replies, errors)
+        res = _forecast_result(prep, model, quantiles, prep.items, out, replies, errors, mean)
         res.timing = {"total_s": round(time.monotonic() - t0, 3), "requests": len(replies)}
         res.provenance = _provenance(
             self.base_url,
@@ -630,6 +649,7 @@ class Client(_Base):
             bool(q),
         )
         res.timing["total_s"] = round(time.monotonic() - t0, 3)
+        res.checks = _profile.Checks(_profile.build(tr, [c for c in tr.columns if c != target]), te)
         res.provenance = _provenance(
             self.base_url,
             "/v1/tabular/predict",
@@ -649,10 +669,64 @@ class Client(_Base):
         warn_all(res.warnings)
         return res
 
+    def evaluate_table(
+        self,
+        data: Any,
+        target: str,
+        *,
+        cv: int = 5,
+        groups: Any = None,
+        time_col: Optional[str] = None,
+        model: str = DEFAULT_TAB_MODEL,
+        task: Optional[str] = None,
+        preset: Optional[str] = None,
+        eval_metric: Optional[str] = None,
+        quantiles: Any = None,
+        seed: int = 0,
+    ) -> TableEvaluation:
+        """Cross-validate on your own table: each row is predicted by a fit that never saw it, then scored for accuracy and for
+        how honest the uncertainty is.
+
+        groups: a column name (or one value per row) whose rows must stay together, e.g. a machine or a batch, so the score is
+        for groups the model has not seen. time_col: time-ordered folds instead (each fold trains only on earlier rows).
+        Classification: accuracy, log loss, Brier score, AUC, calibration error, and a reliability table. Regression: MAE,
+        RMSE, R2 and, with intervals (default quantiles 0.05 to 0.95), CRPS, coverage per interval and a PIT histogram.
+        Cost: one fit-and-predict call per fold; the rows predicted add up to the table's size.
+        """
+        df = _tabular._frame(_pandas(data), "data")
+        if target not in df.columns:
+            raise DataError(f"target {target!r} is not a column. Columns: {list(df.columns)}")
+        df = df[df[target].notna()]
+        tk = _table_eval.infer_task(df[target], task)
+        q = (list(_table_eval.DEFAULT_QUANTILES) if quantiles is None else quantiles) if tk == "regress" else None
+        split = "time-ordered" if time_col else ("grouped" if groups is not None else "shuffled")
+        drop = [groups] if isinstance(groups, str) else []
+        parts, warns = [], []
+        for k, (tr, te) in enumerate(_table_eval.folds(df, cv, groups, time_col, seed)):
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                res = self.predict(
+                    df.iloc[tr].drop(columns=drop),
+                    target,
+                    test=df.iloc[te].drop(columns=[target, *drop]),
+                    model=model,
+                    task=tk,
+                    preset=preset,
+                    eval_metric=eval_metric,
+                    quantiles=q,
+                    seed=seed,
+                )
+            warns += [str(x.message) for x in w]
+            parts.append((k, te, res))
+        out = _table_eval.assemble(tk, split, df, target, parts, sorted(q) if q else None)
+        out.warnings = list(dict.fromkeys(warns))
+        warn_all(out.warnings)
+        return out
+
     def fit(
         self,
         train: Any,
-        target: str,
+        target: Union[str, Sequence[str]],
         *,
         model: str = DEFAULT_TAB_MODEL,
         task: Optional[str] = None,
@@ -661,11 +735,48 @@ class Client(_Base):
         time_limit: Optional[float] = None,
         seed: Optional[int] = None,
         ttl_hours: Optional[float] = None,
-    ) -> FittedModel:
+        profile: bool = True,
+    ) -> Union[FittedModel, FitGroup]:
         """Fit once on our side and get a handle to predict (with intervals for regression) and explain as often as you like;
         each prediction sends only the rows to score. The fit is kept for ttl_hours (default 24, at most 168) or until
         .delete(); `with yh.fit(...) as m:` deletes it on exit. Options as in predict().
+        profile=True keeps a summary of the training table on the handle (ranges, categories, up to 2,000 sample rows), so
+        predictions report out_of_range and novelty; it stays on your machine (and in .save() records). False drops it.
+        target=[...] fits each target on the features alone (the other targets left out) and returns a FitGroup that predicts,
+        explains and deletes them together; task= may then be a dict per target. One fit's quota per target.
         """
+        if not isinstance(target, str):
+            targets = _targets(target, train)
+            opts = dict(
+                model=model,
+                preset=preset,
+                eval_metric=eval_metric,
+                time_limit=time_limit,
+                seed=seed,
+                ttl_hours=ttl_hours,
+                profile=profile,
+            )
+            frame = _tabular._frame(_pandas(train), "train")
+            made: Dict[str, FittedModel] = {}
+
+            def one(t: str) -> FittedModel:
+                m = self.fit(
+                    frame.drop(columns=[o for o in targets if o != t]),
+                    t,
+                    task=task.get(t) if isinstance(task, dict) else task,
+                    **opts,
+                )  # type: ignore[arg-type]
+                made[t] = m  # type: ignore[assignment]
+                return m  # type: ignore[return-value]
+
+            try:
+                with ThreadPoolExecutor(min(4, len(targets))) as ex:
+                    fits = list(ex.map(one, targets))
+            except BaseException:
+                for m in made.values():
+                    m.delete()
+                raise
+            return FitGroup(dict(zip(targets, fits)))
         _tabular.check_options(preset, eval_metric)
         tr, pt, warns = _tabular.prepare_train(train, target, task=task, limits=self.limits)
         body = _tabular.fit_payload(
@@ -678,9 +789,11 @@ class Client(_Base):
                 raise _not_deployed(e) from e
             raise
         warn_all(warns)
-        return FittedModel.from_reply(
+        fm = FittedModel.from_reply(
             reply, [c for c in tr.columns if c != target], _tabular.label_values(tr[target]), self
         )
+        fm.profile = _profile.build(tr, fm.features or []) if profile else None
+        return fm
 
     def get_fit(self, fit_id: str) -> FittedModel:
         """Reattach to a fit by id (labels come back as text unless the handle was pickled)."""
@@ -789,6 +902,7 @@ class AsyncClient(_Base):
         model: str = DEFAULT_TS_MODEL,
         quantiles: Any = None,
         level: Optional[Sequence[float]] = None,
+        mean: bool = False,
         freq: Optional[str] = None,
         id_col: Optional[str] = None,
         time_col: Optional[str] = None,
@@ -819,7 +933,7 @@ class AsyncClient(_Base):
             future=future,
         )
         out, replies, errors = await self._send(prep.items, h, prep.freq, model, season, on_error)
-        res = _forecast_result(prep, model, quantiles, prep.items, out, replies, errors)
+        res = _forecast_result(prep, model, quantiles, prep.items, out, replies, errors, mean)
         res.timing = {"total_s": round(time.monotonic() - t0, 3), "requests": len(replies)}
         res.provenance = _provenance(
             self.base_url,
@@ -941,6 +1055,7 @@ class AsyncClient(_Base):
             bool(q),
         )
         res.timing["total_s"] = round(time.monotonic() - t0, 3)
+        res.checks = _profile.Checks(_profile.build(tr, [c for c in tr.columns if c != target]), te)
         res.provenance = _provenance(
             self.base_url,
             "/v1/tabular/predict",
@@ -960,10 +1075,65 @@ class AsyncClient(_Base):
         warn_all(res.warnings)
         return res
 
+    async def evaluate_table(
+        self,
+        data: Any,
+        target: str,
+        *,
+        cv: int = 5,
+        groups: Any = None,
+        time_col: Optional[str] = None,
+        model: str = DEFAULT_TAB_MODEL,
+        task: Optional[str] = None,
+        preset: Optional[str] = None,
+        eval_metric: Optional[str] = None,
+        quantiles: Any = None,
+        seed: int = 0,
+    ) -> TableEvaluation:
+        """Client.evaluate_table, with the folds run concurrently."""
+        df = _tabular._frame(_pandas(data), "data")
+        if target not in df.columns:
+            raise DataError(f"target {target!r} is not a column. Columns: {list(df.columns)}")
+        df = df[df[target].notna()]
+        tk = _table_eval.infer_task(df[target], task)
+        q = (list(_table_eval.DEFAULT_QUANTILES) if quantiles is None else quantiles) if tk == "regress" else None
+        split = "time-ordered" if time_col else ("grouped" if groups is not None else "shuffled")
+        drop = [groups] if isinstance(groups, str) else []
+        splits = _table_eval.folds(df, cv, groups, time_col, seed)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            results = await asyncio.gather(
+                *[
+                    self.predict(
+                        df.iloc[tr].drop(columns=drop),
+                        target,
+                        test=df.iloc[te].drop(columns=[target, *drop]),
+                        model=model,
+                        task=tk,
+                        preset=preset,
+                        eval_metric=eval_metric,
+                        quantiles=q,
+                        seed=seed,
+                    )
+                    for tr, te in splits
+                ]
+            )
+        out = _table_eval.assemble(
+            tk,
+            split,
+            df,
+            target,
+            [(k, te, r) for k, ((_, te), r) in enumerate(zip(splits, results))],
+            sorted(q) if q else None,
+        )
+        out.warnings = list(dict.fromkeys(str(x.message) for x in w))
+        warn_all(out.warnings)
+        return out
+
     async def fit(
         self,
         train: Any,
-        target: str,
+        target: Union[str, Sequence[str]],
         *,
         model: str = DEFAULT_TAB_MODEL,
         task: Optional[str] = None,
@@ -972,7 +1142,39 @@ class AsyncClient(_Base):
         time_limit: Optional[float] = None,
         seed: Optional[int] = None,
         ttl_hours: Optional[float] = None,
-    ) -> AsyncFittedModel:
+        profile: bool = True,
+    ) -> Union[AsyncFittedModel, AsyncFitGroup]:
+        if not isinstance(target, str):
+            targets = _targets(target, train)
+            opts = dict(
+                model=model,
+                preset=preset,
+                eval_metric=eval_metric,
+                time_limit=time_limit,
+                seed=seed,
+                ttl_hours=ttl_hours,
+                profile=profile,
+            )
+            frame = _tabular._frame(_pandas(train), "train")
+            outs = await asyncio.gather(
+                *[
+                    self.fit(
+                        frame.drop(columns=[o for o in targets if o != t]),
+                        t,
+                        task=task.get(t) if isinstance(task, dict) else task,
+                        **opts,
+                    )
+                    for t in targets
+                ],  # type: ignore[arg-type]
+                return_exceptions=True,
+            )
+            errs = [o for o in outs if isinstance(o, BaseException)]
+            if errs:
+                for o in outs:
+                    if not isinstance(o, BaseException):
+                        await o.delete()  # type: ignore[union-attr]
+                raise errs[0]
+            return AsyncFitGroup(dict(zip(targets, outs)))  # type: ignore[arg-type]
         _tabular.check_options(preset, eval_metric)
         tr, pt, warns = _tabular.prepare_train(train, target, task=task, limits=self.limits)
         body = _tabular.fit_payload(
@@ -988,6 +1190,7 @@ class AsyncClient(_Base):
         fm = FittedModel.from_reply(
             reply, [c for c in tr.columns if c != target], _tabular.label_values(tr[target]), self
         )
+        fm.profile = _profile.build(tr, fm.features or []) if profile else None
         return AsyncFittedModel(**{k: getattr(fm, k) for k in fm.__dataclass_fields__})
 
     async def models(self) -> List[Dict[str, Any]]:

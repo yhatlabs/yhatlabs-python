@@ -19,9 +19,10 @@ from ._errors import (
     UnsupportedError,
     YHatError,
 )
-from ._fits import AsyncFittedModel, FittedModel, load
+from ._fits import AsyncFitGroup, AsyncFittedModel, FitGroup, FittedModel, GroupPrediction, load
 from ._forecast import Limits
 from ._results import EvaluationResult, ForecastResult, PredictionResult
+from ._table_eval import TableEvaluation
 from ._version import __version__
 
 __all__ = [
@@ -32,6 +33,10 @@ __all__ = [
     "load",
     "DataCheck",
     "AsyncFittedModel",
+    "FitGroup",
+    "AsyncFitGroup",
+    "GroupPrediction",
+    "TableEvaluation",
     "ForecastResult",
     "PredictionResult",
     "EvaluationResult",

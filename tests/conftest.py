@@ -91,7 +91,8 @@ class FakeAPI:
             return httpx.Response(404, json={"error": {"type": "not_found", "message": "Not found."}})
         parts = path.strip("/").split("/")  # v1 fits [id] [op]
         if method == "POST" and len(parts) == 2:
-            fid = f"fit_{len(self.fits):024x}"
+            self.n_fits = getattr(self, "n_fits", 0) + 1
+            fid = f"fit_{self.n_fits:024x}"
             ys = [r[body["target"]] for r in body["train"]]
             pt = body.get("problem_type")
             reg = pt == "regression" or (pt is None and all(isinstance(y, float) and not y.is_integer() for y in ys))
