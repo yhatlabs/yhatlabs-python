@@ -18,7 +18,7 @@ pip install yhatlabs
 ```
 
 Optional extras: `[sklearn]` for the scikit-learn estimators, `[parquet]` for faster large tables, `[plot]` for charts,
-`[fast]` for faster encoding, or `[all]`. Requires Python 3.9 or later.
+`[fast]` for faster large uploads, or `[all]`. Requires Python 3.9 or later.
 
 ## Usage
 

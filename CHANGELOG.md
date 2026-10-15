@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `orjson` is now a default dependency, for faster encoding of large requests (the `[fast]` extra now adds pyarrow only).
+
 ## 0.1.1 (2026-10-15)
 
 - Fixed: requests failed without the optional `orjson` package (a plain `pip install yhatlabs`). The standard-library JSON
