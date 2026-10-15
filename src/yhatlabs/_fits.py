@@ -166,7 +166,9 @@ class FittedModel:
         t0 = time.monotonic()
         ref = c._refs(test=te).get("test")
         reply = c._t.request(
-            "POST", f"/v1/fits/{self.id}/predict", _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov, ref)
+            "POST",
+            f"/v1/table/fits/{self.id}/predict",
+            _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov, ref),
         )
         return self._result(reply, te, warns, bool(q), time.monotonic() - t0)
 
@@ -199,7 +201,7 @@ class FittedModel:
         return _importance(
             c._t.request(
                 "POST",
-                f"/v1/fits/{self.id}/importance",
+                f"/v1/table/fits/{self.id}/importance",
                 _importance_body(data, subsample_size, num_shuffle_sets, time_limit),
             )
         )
@@ -225,11 +227,11 @@ class FittedModel:
 
     def delete(self) -> None:
         """Delete the fit on our side (its stored training request and the fitted model). Expired fits are deleted anyway."""
-        self._c()._t.request("DELETE", f"/v1/fits/{self.id}")
+        self._c()._t.request("DELETE", f"/v1/table/fits/{self.id}")
 
     def info(self) -> Dict[str, Any]:
         """The fit as the API holds it: model, target, summary, classes, expiry."""
-        return self._c()._t.request("GET", f"/v1/fits/{self.id}")
+        return self._c()._t.request("GET", f"/v1/table/fits/{self.id}")
 
 
 class AsyncFittedModel(FittedModel):
@@ -242,7 +244,9 @@ class AsyncFittedModel(FittedModel):
         t0 = time.monotonic()
         ref = (await c._refs(test=te)).get("test")
         reply = await c._t.request(
-            "POST", f"/v1/fits/{self.id}/predict", _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov, ref)
+            "POST",
+            f"/v1/table/fits/{self.id}/predict",
+            _tabular.test_payload(te, q, c.limits.max_tabular_bytes, cov, ref),
         )
         return self._result(reply, te, warns, bool(q), time.monotonic() - t0)
 
@@ -264,7 +268,7 @@ class AsyncFittedModel(FittedModel):
         return _importance(
             await c._t.request(
                 "POST",
-                f"/v1/fits/{self.id}/importance",
+                f"/v1/table/fits/{self.id}/importance",
                 _importance_body(data, subsample_size, num_shuffle_sets, time_limit),
             )
         )
@@ -276,10 +280,10 @@ class AsyncFittedModel(FittedModel):
         return _effect_frame(await self.predict(stacked), col, values, len(stacked) // len(values))
 
     async def delete(self) -> None:  # type: ignore[override]
-        await self._c()._t.request("DELETE", f"/v1/fits/{self.id}")
+        await self._c()._t.request("DELETE", f"/v1/table/fits/{self.id}")
 
     async def info(self) -> Dict[str, Any]:  # type: ignore[override]
-        return await self._c()._t.request("GET", f"/v1/fits/{self.id}")
+        return await self._c()._t.request("GET", f"/v1/table/fits/{self.id}")
 
     async def __aenter__(self) -> AsyncFittedModel:
         return self

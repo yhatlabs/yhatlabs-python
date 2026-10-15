@@ -60,7 +60,7 @@ def test_too_many_covariates_checked_locally(client, api):
     client.limits = Limits(max_columns=4)
     with pytest.raises(DataError, match="at most 4"):
         client.forecast(df, h=3, past=[f"c{i}" for i in range(5)])
-    assert not [r for r in api.requests if r[1] == "/v1/forecast"]
+    assert not [r for r in api.requests if r[1] == "/v1/series/forecast"]
 
 
 def test_rows_are_series(client, api):
@@ -90,7 +90,7 @@ def test_datetime_target_refused(client):
 def test_posts_carry_one_idempotency_key_across_retries(client, api):
     api.script = [(500, {"error": {"type": "server_error", "message": "boom"}})]
     client.forecast(_daily(30), h=3)
-    keys = [r[3].get("idempotency-key") for r in api.requests if r[1] == "/v1/forecast"]
+    keys = [r[3].get("idempotency-key") for r in api.requests if r[1] == "/v1/series/forecast"]
     assert len(keys) == 2 and keys[0] and keys[0] == keys[1]
     client.forecast(_daily(30), h=3)
     assert api.requests[-1][3]["idempotency-key"] != keys[0]

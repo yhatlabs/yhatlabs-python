@@ -96,7 +96,9 @@ def test_calendar_forecast(client, api, hourly):
 def test_provenance_and_timing(client, hourly):
     fc = client.forecast(hourly, h=3)
     p = fc.provenance
-    assert p["model"] == "chakra-ts" and p["endpoint"] == "/v1/forecast" and p["sdk"].startswith("yhatlabs-python")
+    assert (
+        p["model"] == "chakra-ts" and p["endpoint"] == "/v1/series/forecast" and p["sdk"].startswith("yhatlabs-python")
+    )
     assert len(p["data_fingerprint"]) == 16 and p["settings"]["h"] == 3 and p["request_ids"]
     assert client.forecast(hourly, h=3).provenance["data_fingerprint"] == p["data_fingerprint"]
     assert fc.timing["total_s"] >= 0 and fc.timing["requests"] == 1

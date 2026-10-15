@@ -1,4 +1,4 @@
-"""Turning tables into /v1/tabular/predict requests and replies into a PredictionResult.
+"""Turning tables into /v1/table/predict requests and replies into a PredictionResult.
 
 The hosted endpoint is stateless fit-and-predict: every call carries the training rows and the rows to score. Two calling
 styles map onto it: train + test (the usual), or one table where the rows with a missing target are the ones to predict.

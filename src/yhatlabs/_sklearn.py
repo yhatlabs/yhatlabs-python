@@ -103,7 +103,7 @@ class _ChakraTab(BaseEstimator):
                 ttl_hours=self.ttl_hours,
             )
             self._train = None
-        except UnsupportedError:  # an API without /v1/fits: one fit-and-predict call per predict
+        except UnsupportedError:  # an API without /v1/table/fits: one fit-and-predict call per predict
             self.fit_ = None
             self._train = train
         return self

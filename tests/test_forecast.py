@@ -15,7 +15,7 @@ def test_long_frame(client, api, hourly):
     assert np.allclose(a["median"], hourly[hourly.unique_id == "a"].y.iloc[-1])
     assert fc.derived == [] and fc.native_quantile_levels[0] == 0.1
     _, path, body, headers = api.requests[0]
-    assert path == "/v1/forecast" and body["freq"].lower() == "h" and body["horizon"] == 12
+    assert path == "/v1/series/forecast" and body["freq"].lower() == "h" and body["horizon"] == 12
     assert headers["user-agent"].startswith("yhatlabs-python/")
     assert fc.usage == {"series": 2, "requests": 1}
 

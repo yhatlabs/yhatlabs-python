@@ -86,7 +86,7 @@ def test_fill_gaps(client, api, hourly):
     a = out[out.unique_id == "a"].reset_index(drop=True)
     assert len(a) == 96 and a.y.notna().all() and a.y_filled.sum() == 4
     assert np.isclose(a.loc[40, "y"], hourly.loc[39, "y"])  # the fake forecasts the last value seen before the gap
-    hs = sorted(b["horizon"] for _, p, b, _ in api.requests if p == "/v1/forecast")
+    hs = sorted(b["horizon"] for _, p, b, _ in api.requests if p == "/v1/series/forecast")
     assert hs == [1, 3]  # one call per gap length
 
 

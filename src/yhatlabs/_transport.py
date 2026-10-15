@@ -40,7 +40,11 @@ if os.environ.get(
         os.environ["YHAT_LOG"].upper() if os.environ["YHAT_LOG"].upper() in ("DEBUG", "INFO", "WARNING") else "INFO"
     )
 
-_LABELS = {"/v1/forecast": "forecasting", "/v1/tabular/predict": "fitting and predicting", "/v1/fits": "fitting"}
+_LABELS = {
+    "/v1/series/forecast": "forecasting",
+    "/v1/table/predict": "fitting and predicting",
+    "/v1/table/fits": "fitting",
+}
 
 
 GZIP_MIN_BYTES = 1024 * 1024
@@ -68,7 +72,7 @@ def _safe_json(r: httpx.Response) -> Any:
 
 
 def _label(method: str, path: str) -> str:
-    if path.endswith("/predict") and path.startswith("/v1/fits/"):
+    if path.endswith("/predict") and path.startswith("/v1/table/fits/"):
         return "predicting"
     if path.endswith("/importance"):
         return "computing importance"

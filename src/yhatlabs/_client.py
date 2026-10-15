@@ -407,7 +407,7 @@ class Client(_Base):
 
         def one(b: List[Item]):
             try:
-                reply = self._t.request("POST", "/v1/forecast", _body(b, h, freq, model, season, extra))
+                reply = self._t.request("POST", "/v1/series/forecast", _body(b, h, freq, model, season, extra))
                 return _unpack(b, reply), reply, None
             except APIError as e:
                 if on_error == "raise":
@@ -521,7 +521,7 @@ class Client(_Base):
         res.timing = {"total_s": round(time.monotonic() - t0, 3), "requests": len(replies)}
         res.provenance = _provenance(
             self.base_url,
-            "/v1/forecast",
+            "/v1/series/forecast",
             model,
             res.request_ids,
             data,
@@ -869,7 +869,7 @@ class Client(_Base):
         t0 = time.monotonic()
         res = _predict_result(
             model,
-            self._t.request("POST", "/v1/tabular/predict", body),
+            self._t.request("POST", "/v1/table/predict", body),
             te,
             _tabular.label_values(tr[target]),
             warns,
@@ -879,7 +879,7 @@ class Client(_Base):
         res.checks = _profile.Checks(_profile.build(tr, _tabular.features_of(tr, target, groups)), te)
         res.provenance = _provenance(
             self.base_url,
-            "/v1/tabular/predict",
+            "/v1/table/predict",
             model,
             [res.request_id or ""],
             train,
@@ -1120,7 +1120,7 @@ class Client(_Base):
             self._refs(train=tr),
         )
         try:
-            reply = self._t.request("POST", "/v1/fits", body)
+            reply = self._t.request("POST", "/v1/table/fits", body)
         except NotFoundError as e:
             if e.type == "not_found":
                 raise _not_deployed(e) from e
@@ -1134,11 +1134,11 @@ class Client(_Base):
 
     def get_fit(self, fit_id: str) -> FittedModel:
         """Reattach to a fit by id (labels come back as text unless the handle was pickled)."""
-        return FittedModel.from_reply(self._t.request("GET", f"/v1/fits/{fit_id}"), None, [], self)
+        return FittedModel.from_reply(self._t.request("GET", f"/v1/table/fits/{fit_id}"), None, [], self)
 
     def fits(self) -> List[Dict[str, Any]]:
         """This key's live fits: [{id, model, target, created_at, expires_at}]."""
-        return self._t.request("GET", "/v1/fits")["data"]
+        return self._t.request("GET", "/v1/table/fits")["data"]
 
     def impute(
         self, df: pd.DataFrame, columns: Cols = None, *, model: str = DEFAULT_TAB_MODEL, preset: Optional[str] = None
@@ -1231,7 +1231,9 @@ class AsyncClient(_Base):
         async def one(b: List[Item]):
             async with sem:
                 try:
-                    reply = await self._t.request("POST", "/v1/forecast", _body(b, h, freq, model, season, extra))
+                    reply = await self._t.request(
+                        "POST", "/v1/series/forecast", _body(b, h, freq, model, season, extra)
+                    )
                     return _unpack(b, reply), reply, None
                 except APIError as e:
                     if on_error == "raise":
@@ -1292,7 +1294,7 @@ class AsyncClient(_Base):
         res.timing = {"total_s": round(time.monotonic() - t0, 3), "requests": len(replies)}
         res.provenance = _provenance(
             self.base_url,
-            "/v1/forecast",
+            "/v1/series/forecast",
             model,
             res.request_ids,
             data,
@@ -1423,7 +1425,7 @@ class AsyncClient(_Base):
         t0 = time.monotonic()
         res = _predict_result(
             model,
-            await self._t.request("POST", "/v1/tabular/predict", body),
+            await self._t.request("POST", "/v1/table/predict", body),
             te,
             _tabular.label_values(tr[target]),
             warns,
@@ -1433,7 +1435,7 @@ class AsyncClient(_Base):
         res.checks = _profile.Checks(_profile.build(tr, _tabular.features_of(tr, target, groups)), te)
         res.provenance = _provenance(
             self.base_url,
-            "/v1/tabular/predict",
+            "/v1/table/predict",
             model,
             [res.request_id or ""],
             train,
@@ -1596,7 +1598,7 @@ class AsyncClient(_Base):
             await self._refs(train=tr),
         )
         try:
-            reply = await self._t.request("POST", "/v1/fits", body)
+            reply = await self._t.request("POST", "/v1/table/fits", body)
         except NotFoundError as e:
             if e.type == "not_found":
                 raise _not_deployed(e) from e

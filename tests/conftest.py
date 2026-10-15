@@ -26,7 +26,7 @@ class FakeAPI:
         self.requests: list = []
         self.script: list = []  # queued (status, body) replies served before the normal behaviour
         self.fits: dict = {}
-        self.no_fits = False  # behave like a gateway without /v1/fits
+        self.no_fits = False  # behave like a gateway without /v1/table/fits
         self.fail_batches = set()  # forecast requests (by order) that answer 500
         self.capabilities: dict = {}  # what /v1/limits advertises
         self.tables: dict = {}  # uploaded table id -> parquet bytes
@@ -66,10 +66,10 @@ class FakeAPI:
             )
         if path.startswith("/v1/uploads"):
             return self.upload_route(request, body)
-        if path.startswith("/v1/fits"):
+        if path.startswith("/v1/table/fits"):
             return self.fit_route(request.method, path, body)
-        if path == "/v1/forecast":
-            n_forecast = sum(1 for r in self.requests if r[1] == "/v1/forecast")
+        if path == "/v1/series/forecast":
+            n_forecast = sum(1 for r in self.requests if r[1] == "/v1/series/forecast")
             if n_forecast in self.fail_batches:
                 return httpx.Response(500, json={"error": {"type": "internal_error", "message": "boom"}})
             h = body["horizon"]
@@ -103,7 +103,7 @@ class FakeAPI:
                     "usage": {"series": n},
                 },
             )
-        if path == "/v1/tabular/predict":
+        if path == "/v1/table/predict":
             return self.tabular(self.resolve(body["train"]), self.resolve(body["test"]), body["target"], body)
         return httpx.Response(404, json={"error": {"type": "not_found", "message": "nope"}})
 
@@ -142,7 +142,7 @@ class FakeAPI:
     def fit_route(self, method: str, path: str, body):
         if self.no_fits:
             return httpx.Response(404, json={"error": {"type": "not_found", "message": "Not found."}})
-        parts = path.strip("/").split("/")  # v1 fits [id] [op]
+        parts = path.strip("/").split("/")[1:]  # table fits [id] [op]
         if method == "POST" and len(parts) == 2:
             self.n_fits = getattr(self, "n_fits", 0) + 1
             fid = f"fit_{self.n_fits:024x}"

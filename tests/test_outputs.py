@@ -77,7 +77,7 @@ def test_evaluate_table_splits(client, api):
     assert isinstance(ev, TableEvaluation) and ev.task == "classify" and ev.split == "grouped"
     assert len(ev.scores) == 4 and {"accuracy", "log_loss", "auc", "brier", "ece"} <= set(ev.summary)
     assert ev.reliability is not None and ev.predictions.index.equals(df.index)
-    tab = [r for r in api.requests if r[1] == "/v1/tabular/predict"]
+    tab = [r for r in api.requests if r[1] == "/v1/table/predict"]
     for _, _, body, _ in tab:  # a group never sits on both sides of a split, and the group column is not a feature
         assert "machine" not in body["train"][0]
     ev = client.evaluate_table(df.drop(columns=["cls"]), "y", time_col="t", cv=3)
@@ -140,7 +140,7 @@ def test_fit_group(client, api, tmp_path):
     g = client.fit(df, ["cls", "y"], task={"cls": "classify", "y": "regress"})
     assert isinstance(g, FitGroup) and g.targets == ["cls", "y"]
     for _, path, body, _ in api.requests:
-        if path == "/v1/fits":  # each target is fitted without the other target
+        if path == "/v1/table/fits":  # each target is fitted without the other target
             assert {"cls", "y"} & set(body["train"][0]) == {body["target"]}
     p = g.predict(df.drop(columns=["cls", "y"]).head(4), quantiles=[0.1, 0.9])
     assert isinstance(p, GroupPrediction) and p["y"].quantiles is not None and p["cls"].probabilities is not None
@@ -203,12 +203,12 @@ def test_groups_time_col_and_prediction_sets(client, api):
     df = _table().drop(columns=["y"])
     test = df.drop(columns=["cls", "machine"]).head(3)  # the groups column is not a feature: test may lack it
     res = client.predict(df, "cls", test=test, groups="machine", set_coverage=0.9)
-    body = [r for r in api.requests if r[1] == "/v1/tabular/predict"][-1][2]
+    body = [r for r in api.requests if r[1] == "/v1/table/predict"][-1][2]
     assert body["groups"] == "machine" and body["set_coverage"] == 0.9 and "machine" not in body["test"][0]
     assert res.set_coverage == 0.9 and res.prediction_sets.tolist() == [[0, 1]] * 3  # labels in their own type
     assert "prediction_set" in res.df.columns
     client.predict(df.drop(columns="machine"), "cls", test=test, time_col="t")  # time_col stays a feature
-    assert [r for r in api.requests if r[1] == "/v1/tabular/predict"][-1][2]["time_col"] == "t"
+    assert [r for r in api.requests if r[1] == "/v1/table/predict"][-1][2]["time_col"] == "t"
     with pytest.raises(DataError, match="not both"):
         client.predict(df, "cls", test=test, groups="machine", time_col="t")
     with pytest.raises(DataError, match="must name a column"):
@@ -216,7 +216,7 @@ def test_groups_time_col_and_prediction_sets(client, api):
     with pytest.raises(DataError, match="classification"):
         client.predict(_table().drop(columns="cls"), "y", test=test, task="regress", set_coverage=0.9)
     m = client.fit(df, "cls", groups="machine")
-    assert [r for r in api.requests if r[1] == "/v1/fits"][-1][2]["groups"] == "machine"
+    assert [r for r in api.requests if r[1] == "/v1/table/fits"][-1][2]["groups"] == "machine"
     assert "machine" not in m.features
     assert m.predict(test, set_coverage=0.8).set_coverage == 0.8
 
@@ -231,7 +231,7 @@ def test_forecast_levels_samples_and_history_follow_the_capabilities(client, api
     caps = {"forecast_quantile_levels": True, "forecast_samples": True, "forecast_history": True}
     client.limits = Limits(capabilities=caps)
     fc = client.forecast(hourly, h=4, level=[95], samples=5, seed=3, history=True)
-    body = [r for r in api.requests if r[1] == "/v1/forecast"][-1][2]
+    body = [r for r in api.requests if r[1] == "/v1/series/forecast"][-1][2]
     assert (
         body["quantile_levels"] == [0.025, 0.5, 0.975]
         and body["samples"] == 5
@@ -260,12 +260,12 @@ def test_large_tables_are_uploaded_once_and_folds_name_their_rows(client, api, m
     assert api.slots == 0
     client.limits = Limits(capabilities={"table_uploads": True})
     res = client.predict(df, "cls", test=df.drop(columns="cls").head(3))
-    body = [r for r in api.requests if r[1] == "/v1/tabular/predict"][-1][2]
+    body = [r for r in api.requests if r[1] == "/v1/table/predict"][-1][2]
     assert body["train"]["format"] == "table" and len(api.tables) == 1 and len(res.predictions) == 3
     client.predict(df, "cls", test=df.drop(columns="cls").head(3))  # the same table again: no new slot, no upload
     assert api.slots == 1
     ev = client.evaluate_table(df, "cls", cv=4)
-    folds = [r[2] for r in api.requests if r[1] == "/v1/tabular/predict"][-4:]
+    folds = [r[2] for r in api.requests if r[1] == "/v1/table/predict"][-4:]
     assert all(f["train"]["format"] == "table" and f["test"]["drop"] == ["cls"] for f in folds)
     assert sorted(i for f in folds for i in f["test"]["rows"]) == list(range(len(df)))  # every row scored once
     assert len(ev.predictions) == len(df) and len(api.tables) == 1  # the same bytes as before: nothing new to upload
