@@ -17,10 +17,18 @@ from ._fits import FittedModel
 
 try:
     from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
-except ImportError:  # usable without scikit-learn, minus get_params/clone
+except ImportError:  # usable without scikit-learn (clone and pipelines need it)
 
     class BaseEstimator:  # type: ignore[no-redef]
-        pass
+        def get_params(self, deep: bool = True) -> dict:
+            import inspect
+
+            return {k: getattr(self, k) for k in inspect.signature(type(self).__init__).parameters if k != "self"}
+
+        def set_params(self, **params: object) -> BaseEstimator:
+            for k, v in params.items():
+                setattr(self, k, v)
+            return self
 
     class ClassifierMixin:  # type: ignore[no-redef]
         _estimator_type = "classifier"
@@ -103,7 +111,7 @@ class _ChakraTab(BaseEstimator):
                 ttl_hours=self.ttl_hours,
             )
             self._train = None
-        except UnsupportedError:  # an API without /v1/fits: one fit-and-predict call per predict
+        except UnsupportedError:  # an API without /v1/table/fits: one fit-and-predict call per predict
             self.fit_ = None
             self._train = train
         return self

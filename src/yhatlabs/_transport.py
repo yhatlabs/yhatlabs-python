@@ -3,29 +3,33 @@
 from __future__ import annotations
 
 import asyncio
+import gzip as gzip_lib
+import json as jsonlib
 import logging
 import os
 import random
 import time
+import uuid
 from typing import Any, Optional
 
 import httpx
 
-try:  # orjson encodes large request bodies several times faster; optional
+from ._errors import APIConnectionError, APITimeoutError, ConfigurationError, error_from_response
+from ._progress import activity
+from ._version import __version__
+
+
+def _dumps_std(obj: Any) -> bytes:
+    return jsonlib.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
+
+
+try:  # orjson (a default dependency) encodes large request bodies several times faster; the standard library is the fallback
     import orjson
 
     def _dumps(obj: Any) -> bytes:
         return orjson.dumps(obj, option=orjson.OPT_SERIALIZE_NUMPY)
 except ImportError:  # pragma: no cover
-    import json as jsonlib
-
-    def _dumps(obj: Any) -> bytes:
-        return jsonlib.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
-
-
-from ._errors import APIConnectionError, APITimeoutError, ConfigurationError, error_from_response
-from ._progress import activity
-from ._version import __version__
+    _dumps = _dumps_std
 
 log = logging.getLogger("yhatlabs")
 if os.environ.get(
@@ -38,11 +42,39 @@ if os.environ.get(
         os.environ["YHAT_LOG"].upper() if os.environ["YHAT_LOG"].upper() in ("DEBUG", "INFO", "WARNING") else "INFO"
     )
 
-_LABELS = {"/v1/forecast": "forecasting", "/v1/tabular/predict": "fitting and predicting", "/v1/fits": "fitting"}
+_LABELS = {
+    "/v1/series/forecast": "forecasting",
+    "/v1/table/predict": "fitting and predicting",
+    "/v1/table/fits": "fitting",
+}
+
+
+GZIP_MIN_BYTES = 1024 * 1024
+
+
+def _prepare(method: str, json: Any, headers: dict, gzip: bool = False) -> tuple:
+    """The body is encoded once, and a POST carries one Idempotency-Key across all its retries, so a retry after a
+    timeout can be recognised by the API as the same call (no second fit, no second charge). With gzip (the API's
+    gzip_requests capability), bodies over GZIP_MIN_BYTES are compressed: JSON numbers shrink several times.
+    """
+    if method == "POST":
+        headers = {**headers, "Idempotency-Key": uuid.uuid4().hex}
+    body = None if json is None else _dumps(json)
+    if gzip and body is not None and len(body) > GZIP_MIN_BYTES:
+        body = gzip_lib.compress(body, compresslevel=5)
+        headers = {**headers, "Content-Encoding": "gzip"}
+    return body, headers
+
+
+def _safe_json(r: httpx.Response) -> Any:
+    try:
+        return r.json()
+    except ValueError:
+        return {"error": {"message": r.text[:200]}}
 
 
 def _label(method: str, path: str) -> str:
-    if path.endswith("/predict") and path.startswith("/v1/fits/"):
+    if path.endswith("/predict") and path.startswith("/v1/table/fits/"):
         return "predicting"
     if path.endswith("/importance"):
         return "computing importance"
@@ -120,6 +152,18 @@ def _is_streamed(resp: httpx.Response) -> bool:
     return resp.status_code == 200 and _streamed_error(_json(resp)) is not None
 
 
+COLD_START_S = 300.0  # a model scaled to zero takes a few minutes to start; its 503s are waited out this long
+
+
+def _waking(resp: httpx.Response) -> bool:
+    """A 503 sent before the call reached the model (it is starting), as opposed to one after a long fit."""
+    return resp.status_code == 503 and "starting up" in str(((_json(resp) or {}).get("error") or {}).get("message", ""))
+
+
+def _waking_wait(until: float) -> float:
+    return max(0.0, min(15.0, until - time.monotonic()))
+
+
 def _should_retry(resp: httpx.Response, streamed_retries: int = 0) -> bool:
     status = resp.status_code
     if status == 200:
@@ -164,6 +208,7 @@ class SyncTransport:
         self._own = http_client is None
         self.http = http_client or httpx.Client(timeout=timeout)
         self.timeout = timeout
+        self.gzip = False
 
     def headers(self) -> dict:
         return {
@@ -173,6 +218,18 @@ class SyncTransport:
             "Content-Type": "application/json",
         }
 
+    def put_bytes(self, url: str, data: bytes, auth: bool) -> None:
+        """An upload: to a signed storage URL (no key), or to the API itself (with the key)."""
+        url = f"{self.base_url}{url}" if url.startswith("/") else url  # a path on the API, or a signed storage URL
+        headers = {
+            "Content-Type": "application/octet-stream",
+            **({"Authorization": f"Bearer {self.api_key}"} if auth else {}),
+        }
+        with activity("uploading the table"):
+            r = self.http.put(url, content=data, headers=headers, timeout=max(self.timeout or 0, 600))
+        if r.status_code >= 400:
+            raise error_from_response(r.status_code, _safe_json(r), r.headers.get("X-Request-Id"))
+
     def request(self, method: str, path: str, json: Any = None) -> Any:
         if method == "POST":
             with activity(_label(method, path)):
@@ -181,35 +238,45 @@ class SyncTransport:
 
     def _request(self, method: str, path: str, json: Any = None) -> Any:
         url = f"{self.base_url}{path}"
+        body, headers = _prepare(method, json, self.headers(), self.gzip)
         last_resp: Optional[httpx.Response] = None
-        streamed_retries = 0
-        for attempt in range(self.max_retries + 1):
+        streamed_retries, waking_until = 0, None
+        attempt = 0
+        while attempt <= self.max_retries:
             t0 = time.monotonic()
             try:
                 resp = self.http.request(
                     method,
                     url,
-                    content=None if json is None else _dumps(json),
-                    headers=self.headers(),
+                    content=body,
+                    headers=headers,
                     timeout=self.timeout,
                 )
             except httpx.TimeoutException as e:
                 _log(method, path, None, t0, attempt, "timed out")
                 if attempt < self.max_retries:
                     time.sleep(_backoff(attempt, None))
+                    attempt += 1
                     continue
                 raise APITimeoutError(f"The request to {path} timed out after {self.timeout:.0f}s.") from e
             except httpx.TransportError as e:
                 _log(method, path, None, t0, attempt, f"connection error: {type(e).__name__}")
                 if attempt < self.max_retries:
                     time.sleep(_backoff(attempt, None))
+                    attempt += 1
                     continue
                 raise APIConnectionError(f"Could not reach {self.base_url}: {e}") from e
             last_resp = resp
             _log(method, path, resp, t0, attempt)
+            if _waking(resp):  # waited out apart from max_retries, up to COLD_START_S
+                waking_until = waking_until or time.monotonic() + COLD_START_S
+                if time.monotonic() < waking_until:
+                    time.sleep(_waking_wait(waking_until))
+                    continue
             if attempt < self.max_retries and _should_retry(resp, streamed_retries):
                 streamed_retries += _is_streamed(resp)
                 time.sleep(_backoff(attempt, resp))
+                attempt += 1
                 continue
             return _decode(resp)
         return _decode(last_resp)  # pragma: no cover
@@ -234,6 +301,7 @@ class AsyncTransport:
         self._own = http_client is None
         self.http = http_client or httpx.AsyncClient(timeout=timeout)
         self.timeout = timeout
+        self.gzip = False
 
     def headers(self) -> dict:
         return {
@@ -243,6 +311,17 @@ class AsyncTransport:
             "Content-Type": "application/json",
         }
 
+    async def put_bytes(self, url: str, data: bytes, auth: bool) -> None:
+        url = f"{self.base_url}{url}" if url.startswith("/") else url  # a path on the API, or a signed storage URL
+        headers = {
+            "Content-Type": "application/octet-stream",
+            **({"Authorization": f"Bearer {self.api_key}"} if auth else {}),
+        }
+        with activity("uploading the table"):
+            r = await self.http.put(url, content=data, headers=headers, timeout=max(self.timeout or 0, 600))
+        if r.status_code >= 400:
+            raise error_from_response(r.status_code, _safe_json(r), r.headers.get("X-Request-Id"))
+
     async def request(self, method: str, path: str, json: Any = None) -> Any:
         if method == "POST":
             with activity(_label(method, path)):
@@ -251,35 +330,45 @@ class AsyncTransport:
 
     async def _request(self, method: str, path: str, json: Any = None) -> Any:
         url = f"{self.base_url}{path}"
+        body, headers = _prepare(method, json, self.headers(), self.gzip)
         last_resp: Optional[httpx.Response] = None
-        streamed_retries = 0
-        for attempt in range(self.max_retries + 1):
+        streamed_retries, waking_until = 0, None
+        attempt = 0
+        while attempt <= self.max_retries:
             t0 = time.monotonic()
             try:
                 resp = await self.http.request(
                     method,
                     url,
-                    content=None if json is None else _dumps(json),
-                    headers=self.headers(),
+                    content=body,
+                    headers=headers,
                     timeout=self.timeout,
                 )
             except httpx.TimeoutException as e:
                 _log(method, path, None, t0, attempt, "timed out")
                 if attempt < self.max_retries:
                     await asyncio.sleep(_backoff(attempt, None))
+                    attempt += 1
                     continue
                 raise APITimeoutError(f"The request to {path} timed out after {self.timeout:.0f}s.") from e
             except httpx.TransportError as e:
                 _log(method, path, None, t0, attempt, f"connection error: {type(e).__name__}")
                 if attempt < self.max_retries:
                     await asyncio.sleep(_backoff(attempt, None))
+                    attempt += 1
                     continue
                 raise APIConnectionError(f"Could not reach {self.base_url}: {e}") from e
             last_resp = resp
             _log(method, path, resp, t0, attempt)
+            if _waking(resp):
+                waking_until = waking_until or time.monotonic() + COLD_START_S
+                if time.monotonic() < waking_until:
+                    await asyncio.sleep(_waking_wait(waking_until))
+                    continue
             if attempt < self.max_retries and _should_retry(resp, streamed_retries):
                 streamed_retries += _is_streamed(resp)
                 await asyncio.sleep(_backoff(attempt, resp))
+                attempt += 1
                 continue
             return _decode(resp)
         return _decode(last_resp)  # pragma: no cover

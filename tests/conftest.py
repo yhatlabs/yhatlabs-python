@@ -26,11 +26,17 @@ class FakeAPI:
         self.requests: list = []
         self.script: list = []  # queued (status, body) replies served before the normal behaviour
         self.fits: dict = {}
-        self.no_fits = False  # behave like a gateway without /v1/fits
+        self.no_fits = False  # behave like a gateway without /v1/table/fits
         self.fail_batches = set()  # forecast requests (by order) that answer 500
+        self.capabilities: dict = {}  # what /v1/limits advertises
+        self.tables: dict = {}  # uploaded table id -> parquet bytes
+        self.slots = 0  # POST /v1/uploads calls
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content) if request.content else None
+        try:
+            body = json.loads(request.content) if request.content else None
+        except ValueError:  # an upload's bytes
+            body = None
         self.requests.append((request.method, request.url.path, body, dict(request.headers)))
         if self.script:
             status, reply = self.script.pop(0)
@@ -55,21 +61,36 @@ class FakeAPI:
                         "max_horizon": 48,
                     },
                     "tabular": {"max_rows": 1000, "max_bytes": 10_000_000},
+                    "capabilities": self.capabilities,
                 },
             )
-        if path.startswith("/v1/fits"):
+        if path.startswith("/v1/uploads"):
+            return self.upload_route(request, body)
+        if path.startswith("/v1/table/fits"):
             return self.fit_route(request.method, path, body)
-        if path == "/v1/forecast":
-            n_forecast = sum(1 for r in self.requests if r[1] == "/v1/forecast")
+        if path == "/v1/series/forecast":
+            n_forecast = sum(1 for r in self.requests if r[1] == "/v1/series/forecast")
             if n_forecast in self.fail_batches:
                 return httpx.Response(500, json={"error": {"type": "internal_error", "message": "boom"}})
             h = body["horizon"]
+            levels = body.get("quantile_levels") or LEVELS
+            q = lambda last: [[last + (lv - 0.5) * 10 for lv in levels] for _ in range(h)]  # noqa: E731
             fcs = []
             for s in body["series"]:
                 if "targets" in s:
-                    fcs.append({"id": s["id"], "targets": {k: _deciles(_last(v), h) for k, v in s["targets"].items()}})
+                    f = {"id": s["id"], "targets": {k: q(_last(v)) for k, v in s["targets"].items()}}
                 else:
-                    fcs.append({"id": s["id"], "quantiles": _deciles(_last(s["values"]), h)})
+                    f = {"id": s["id"], "quantiles": q(_last(s["values"]))}
+                    last = _last(s["values"])
+                    if body.get("samples"):
+                        f["samples"] = [[last + k for _ in range(h)] for k in range(body["samples"])]
+                    if body.get("history"):
+                        T = len(s["values"])
+                        f["history"] = [
+                            {"cutoff": T - 2 * h, "quantiles": q(last)},
+                            {"cutoff": T - h, "quantiles": q(last)},
+                        ]
+                fcs.append(f)
             n = len(body["series"])
             return httpx.Response(
                 200,
@@ -77,21 +98,54 @@ class FakeAPI:
                     "id": f"req_{len(self.requests)}",
                     "model": body["model"],
                     "horizon": h,
-                    "quantile_levels": LEVELS,
+                    "quantile_levels": levels,
                     "forecasts": fcs,
                     "usage": {"series": n},
                 },
             )
-        if path == "/v1/tabular/predict":
-            return self.tabular(body["train"], body["test"], body["target"], body)
+        if path == "/v1/table/predict":
+            return self.tabular(self.resolve(body["train"]), self.resolve(body["test"]), body["target"], body)
         return httpx.Response(404, json={"error": {"type": "not_found", "message": "nope"}})
+
+    def upload_route(self, request: httpx.Request, body):
+        tid = "tbl_" + (body["sha256"][:40] if body else request.url.path.rsplit("_", 1)[-1])
+        if request.method == "POST":
+            self.slots += 1
+            if tid in self.tables:
+                return httpx.Response(
+                    200, json={"id": tid, "object": "table", "exists": True, "size_bytes": len(self.tables[tid])}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": tid,
+                    "object": "table",
+                    "exists": False,
+                    "upload": {"method": "PUT", "url": f"/v1/uploads/{tid}", "auth": True},
+                },
+            )
+        self.tables[request.url.path.rsplit("/", 1)[-1]] = request.content
+        return httpx.Response(200, json={"id": tid, "exists": True})
+
+    def resolve(self, t):
+        """A table reference -> its rows, as the model server reads it."""
+        if not (isinstance(t, dict) and t.get("format") == "table"):
+            return t
+        import io
+
+        df = pd.read_parquet(io.BytesIO(self.tables[t["id"]]))
+        if t.get("rows") is not None:
+            df = df.iloc[t["rows"]]
+        df = df.drop(columns=[c for c in t.get("drop", []) if c in df.columns])
+        return json.loads(df.to_json(orient="records"))
 
     def fit_route(self, method: str, path: str, body):
         if self.no_fits:
             return httpx.Response(404, json={"error": {"type": "not_found", "message": "Not found."}})
-        parts = path.strip("/").split("/")  # v1 fits [id] [op]
+        parts = path.strip("/").split("/")[1:]  # table fits [id] [op]
         if method == "POST" and len(parts) == 2:
-            fid = f"fit_{len(self.fits):024x}"
+            self.n_fits = getattr(self, "n_fits", 0) + 1
+            fid = f"fit_{self.n_fits:024x}"
             ys = [r[body["target"]] for r in body["train"]]
             pt = body.get("problem_type")
             reg = pt == "regression" or (pt is None and all(isinstance(y, float) and not y.is_integer() for y in ys))
@@ -142,7 +196,12 @@ class FakeAPI:
                 },
             )
         if parts[3] == "predict":
-            r = self.tabular(fb["train"], body["test"], fb["target"], {**fb, "quantiles": body.get("quantiles")})
+            r = self.tabular(
+                fb["train"],
+                body["test"],
+                fb["target"],
+                {**fb, "quantiles": body.get("quantiles"), "set_coverage": body.get("set_coverage")},
+            )
             j = json.loads(r.content)
             j.pop("fit", None)
             j["fit_id"] = fid
@@ -198,18 +257,18 @@ class FakeAPI:
         classes = sorted({str(y) for y in ys})
         counts = [sum(str(y) == c for y in ys) / len(ys) for c in classes]
         top = classes[int(np.argmax(counts))]
-        return httpx.Response(
-            200,
-            json={
-                "id": "req_tab",
-                "model": body.get("model"),
-                "predictions": [top] * n,
-                "probabilities": [counts] * n,
-                "classes": classes,
-                "fit": fit,
-                "usage": {"rows": n},
-            },
-        )
+        out = {
+            "id": "req_tab",
+            "model": body.get("model"),
+            "predictions": [top] * n,
+            "probabilities": [counts] * n,
+            "classes": classes,
+            "fit": fit,
+            "usage": {"rows": n},
+        }
+        if body.get("set_coverage"):
+            out.update(prediction_sets=[classes] * n, set_coverage=body["set_coverage"])
+        return httpx.Response(200, json=out)
 
 
 @pytest.fixture(autouse=True)

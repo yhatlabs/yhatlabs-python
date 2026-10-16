@@ -57,6 +57,9 @@ def _cols(p: argparse.ArgumentParser) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    import warnings
+
+    warnings.formatwarning = lambda message, *_a, **_k: f"yhatlabs: warning: {message}\n"
     ap = argparse.ArgumentParser(
         prog="yhatlabs", description="YHat Labs prediction API from the command line (key: YHAT_API_KEY)."
     )
@@ -100,6 +103,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         p.add_argument("--preset", choices=["fast", "medium", "full"]),
     )
     p.add_argument("--quantiles"), p.add_argument("--model"), p.add_argument("-o", "--output")
+    p.add_argument("--groups", help="column whose rows stay together in validation (machine, batch, patient)")
+    p.add_argument("--time-col", dest="split_time", help="validate on contiguous periods of this column")
+    p.add_argument("--set-coverage", type=float, help="classification: prediction sets with this coverage, e.g. 0.9")
+    et = sub.add_parser("evaluate-table", help="tabular: cross-validate on your own table (accuracy and calibration)")
+    et.add_argument("data"), et.add_argument("--target", required=True), et.add_argument("--cv", type=int, default=5)
+    et.add_argument("--groups"), et.add_argument("--time-col", dest="split_time")
+    (
+        et.add_argument("--task", choices=["classify", "regress"]),
+        et.add_argument("--preset", choices=["fast", "medium", "full"]),
+    )
+    et.add_argument("--model"), et.add_argument("-o", "--output", help="write every row's out-of-fold prediction here")
     for name in ("models", "usage", "limits", "fits", "whoami"):
         sub.add_parser(name)
     k = sub.add_parser("check", help="check a file locally before sending it (no key needed)")
@@ -160,9 +174,43 @@ def main(argv: Optional[List[str]] = None) -> int:
                     task=args.task,
                     preset=args.preset,
                     quantiles=_floats(args.quantiles),
+                    groups=args.groups,
+                    time_col=args.split_time,
+                    set_coverage=args.set_coverage,
                     **({"model": args.model} if args.model else {}),
                 )
                 _write(res.df.reset_index(), args.output)
+                return 0
+            if args.cmd == "evaluate-table":
+                ev = yh.evaluate_table(
+                    _read(args.data),
+                    args.target,
+                    cv=args.cv,
+                    groups=args.groups,
+                    time_col=args.split_time,
+                    task=args.task,
+                    preset=args.preset,
+                    **({"model": args.model} if args.model else {}),
+                )
+                if JSON_OUT:
+                    tables = {
+                        k: getattr(ev, k).to_dict(orient="records")
+                        for k in ("reliability", "coverage", "pit")
+                        if getattr(ev, k) is not None
+                    }
+                    print(
+                        json.dumps(
+                            {"task": ev.task, "split": ev.split, "summary": ev.summary, **tables}, indent=2, default=str
+                        )
+                    )
+                else:
+                    print(ev)
+                    print(pd.Series(ev.summary).round(4).to_string())
+                    for k in ("reliability", "coverage"):
+                        if getattr(ev, k) is not None:
+                            print(f"\n{k}:\n" + getattr(ev, k).round(3).to_string(index=False))
+                if args.output:
+                    _write(ev.predictions.reset_index(), args.output)
                 return 0
             common = dict(
                 id_col=args.id_col,

@@ -18,7 +18,7 @@ pip install yhatlabs
 ```
 
 Optional extras: `[sklearn]` for the scikit-learn estimators, `[parquet]` for faster large tables, `[plot]` for charts,
-`[fast]` for faster encoding, or `[all]`. Requires Python 3.9 or later.
+`[fast]` for faster large uploads, or `[all]`. Requires Python 3.9 or later.
 
 ## Usage
 
@@ -69,9 +69,9 @@ print(fc.df.head(3))
 
 ```
   unique_id      Month    q10  median    q90
-0  series_0 1961-01-01  428.7   446.2  466.0
-1  series_0 1961-02-01  406.1   428.9  449.8
-2  series_0 1961-03-01  442.7   482.7  507.2
+0  series_0 1961-01-01  430.5   448.5  468.0
+1  series_0 1961-02-01  408.9   430.9  452.0
+2  series_0 1961-03-01  449.0   486.7  508.2
 ```
 
 ![Airline passengers forecast with an 80% interval](https://raw.githubusercontent.com/yhatlabs/yhatlabs-python/main/docs/images/forecast.png)
@@ -85,6 +85,9 @@ timestamps and splits large inputs into requests for you.
 | Goal | Call |
 |---|---|
 | Forecast with a range of outcomes | `yh.forecast(df, h)` |
+| Wide intervals for rare outcomes (95%, 99%) | `yh.forecast(df, h, level=[95, 99])` |
+| Totals, peaks and runs over the horizon | `yh.forecast(df, h, samples=1000)`, then `fc.sample_paths()` |
+| The chance of crossing a limit | `fc.prob(above=limit)` |
 | Use inputs you know ahead (prices, weather, promotions) | `yh.forecast(df, h, known=[...], future=...)` |
 | Add calendar effects (hour, weekday, holidays) | `yh.forecast(df, h, calendar=True)` |
 | Measure accuracy on your own history | `yh.evaluate(df, h, windows=3)` |
@@ -92,6 +95,7 @@ timestamps and splits large inputs into requests for you.
 | Ask "what if" (a heatwave, a price change) | `yh.scenarios(df, h, {"base": f0, "heatwave": f1}, known=[...])` |
 | Flag unusual points | `yh.detect_anomalies(df)` |
 | Fill gaps inside series | `yh.fill_gaps(df)` |
+| Forecasts that add up (stores, regions, total) | `yhatlabs.hierarchy.aggregate(...)`, then `hierarchy.reconcile(fc, tree)` |
 
 ### Inputs and uncertainty
 
@@ -117,10 +121,12 @@ fc.plot(history=df)
 ```
 
 - **Uncertainty:** the default is the median plus the 0.1 and 0.9 quantiles.
-  - `quantiles=` takes any levels between 0.1 and 0.9.
-  - `level=[80]` gives central intervals.
-  - `quantiles="all"` returns every level the model produces.
-  - Levels between those are interpolated and listed in `fc.derived`, so nothing derived is presented as a model output.
+  - `quantiles=` takes any levels strictly between 0 and 1, and `level=[80, 95, 99]` gives central intervals by width.
+  - Intervals are calibrated on each series' own past windows, so an 80% interval holds about 80% of the time there.
+  - `quantiles="all"` returns every level the model produces; levels between those are interpolated and listed in
+    `fc.derived`.
+  - `mean=True` adds the mean, for forecasts you will add up; `samples=N` returns sample paths; `history=True` returns
+    the model's forecasts of earlier windows.
 - **Covariates:**
   - `known=[...]` are columns you know ahead, with their future values in `future=`;
   - `past=[...]` are observed only in the history;
@@ -189,7 +195,7 @@ print(res.df.head(3))
 ```
      prediction    p_0    p_1
 512           0  1.000  0.000
-457           1  0.018  0.982
+457           1  0.013  0.987
 439           1  0.000  1.000
 ```
 
@@ -213,11 +219,16 @@ model.importance(holdout)
 |---|---|
 | Classify (with probabilities) or regress | `yh.fit(train, target).predict(test)` |
 | Get prediction intervals for numbers | `model.predict(test, quantiles=[0.05, 0.95])` |
+| Get sets of likely classes | `model.predict(test, set_coverage=0.9).prediction_sets` |
+| Validate on new machines, patients or periods | `yh.fit(train, target, groups="machine")` or `time_col="date"` |
+| Measure accuracy and calibration on your table | `yh.evaluate_table(df, target, cv=5)` |
+| See how one column moves the prediction | `model.effect("temperature")` |
 | See which columns matter | `model.importance(holdout)` |
 | Reuse a fit later, anywhere | `model.save("model.json")`, then `yhatlabs.load("model.json")` |
 | Predict once, keeping nothing | `yh.predict(train, target, test)` |
 | Fill missing cells | `yh.impute(df)` |
 | Use it in scikit-learn | `ChakraTabClassifier()`, `ChakraTabRegressor()` |
+| Know the cost before you run | `yh.estimate_table(train, target=..., test=...)` |
 
 ### Fitting, intervals and importance
 
@@ -227,9 +238,12 @@ sending the training data again.
 - **Lifetime:** a fit is kept for `ttl_hours` (default 24, up to 168), or until `model.delete()`. A `with yh.fit(...) as
   model:` block deletes it on exit. `model.save(path)` writes a small record, with no training data, that `yhatlabs.load()`
   reattaches anywhere.
-- **Classes and numbers:** classification returns `predictions` and `probabilities`. Regression returns `predictions` and,
-  with `quantiles=`, intervals built from out-of-sample errors, so a 90% interval holds about 90% of new values. Pass
-  `task="classify"` or `task="regress"` for integer targets, which could be either.
+- **Classes and numbers:** classification returns `predictions` and `probabilities`, and with `set_coverage=` a set of
+  classes per row that holds the true one that often. Regression returns `predictions` and, with `quantiles=`, an interval
+  from a calibrated distribution for every row: wider where the row is harder to call or lies outside the training data.
+  Pass `task="classify"` or `task="regress"` for integer targets, which could be either.
+- **Rows that belong together:** with `groups="machine"` (or `time_col=` for rows over time), validation holds out whole
+  groups or later periods, so scores and intervals hold for groups the model has not seen.
 - **Presets:** `fast` is the default; `medium` is more accurate and about 3x slower. `eval_metric=`, `time_limit=` and
   `seed=` are also accepted.
 - **Importance:** how much the score drops when a column is shuffled. Labeled rows the model has not seen give the most honest
@@ -319,6 +333,7 @@ The defaults suit most work. These settings are there for long jobs, self-hosted
 | Server | `base_url=` or `YHAT_BASE_URL` (default `https://api.yhatlabs.com`) |
 | Timeout and retries | `timeout=` (default 300 s), `max_retries=` (default 3); for a single call, `yh.with_options(timeout=1800)` |
 | Parallel requests | `max_concurrency=` (default 4) |
+| Column names | `mask_columns=True` sends them as `c0`, `c1`, ...; results keep your names (default off) |
 | Request logging | `YHAT_LOG=info`: method, path, status, time and request id (never data or keys) |
 | Activity line | shown in terminals for calls over 2 s; `YHAT_PROGRESS=0` turns it off |
 
@@ -340,7 +355,7 @@ Errors tell you whose side the problem is on and what to do next. Temporary prob
 - **From the API:** `APIError` and its subclasses (`AuthenticationError`, `RateLimitError`, `ServiceUnavailableError`, ...)
   carry `.status`, `.type` and `.request_id`. Quote the request id to us and we can trace the call.
 - **Retries:** timeouts, connection errors, 408, 409, 429 and 5xx are retried with backoff, honouring `Retry-After`. A
-  used-up quota is not retried.
+  used-up quota is not retried. Every POST carries an `Idempotency-Key`, so a retried call never runs twice.
 - **Partial results:** for large forecasts, `on_error="warn"` returns the series from batches that succeeded and lists the
   rest in `fc.errors`.
 
@@ -352,6 +367,8 @@ Errors tell you whose side the problem is on and what to do next. Temporary prob
 Your inputs are sent to the YHat Labs API to be processed.
 - **One-shot calls:** nothing is kept beyond our request archive.
 - **Fits:** a fitted model keeps its training table only until it expires or you delete it.
+- **Large tables:** with the `[parquet]` extra, tables over 8 MB are uploaded once and reused by reference.
+- **Column names:** `mask_columns=True` keeps them on your machine; values are sent as they are.
 - **More:** see [SECURITY.md](SECURITY.md) for how keys and data are handled, and how to report a security issue.
 
 </details>

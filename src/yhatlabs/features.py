@@ -70,12 +70,13 @@ def make_future(
     *,
     id_col: Optional[str] = None,
     time_col: Optional[str] = None,
+    target_col: Optional[str] = None,
     freq: Optional[str] = None,
 ) -> pd.DataFrame:
     """The id and timestamps of the next `h` steps of every series, at the series' own frequency: fill in your known covariates
     (prices, planned promotions, weather forecasts) and pass it as future=.
     """
-    prep = prepare(df, h, id_col=id_col, time_col=time_col, freq=freq)
+    prep = prepare(df, h, id_col=id_col, time_col=time_col, target_col=target_col, freq=freq)
     return pd.concat(
         [pd.DataFrame({prep.id_col: it.uid, prep.time_col: it.future_times}) for it in prep.items], ignore_index=True
     )

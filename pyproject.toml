@@ -20,13 +20,13 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Typing :: Typed",
 ]
-dependencies = ["httpx>=0.24", "numpy>=1.22", "pandas>=1.5"]
+dependencies = ["httpx>=0.24", "numpy>=1.22", "pandas>=1.5", "orjson>=3.9"]
 
 [project.optional-dependencies]
 sklearn = ["scikit-learn>=1.2"]
 parquet = ["pyarrow>=12"]
 plot = ["matplotlib>=3.5"]
-fast = ["orjson>=3.9", "pyarrow>=12"]
+fast = ["pyarrow>=12"]
 all = ["scikit-learn>=1.2", "pyarrow>=12", "matplotlib>=3.5", "orjson>=3.9", "holidays>=0.40", "polars>=0.20"]
 dev = ["pytest>=7", "pytest-asyncio>=0.21", "ruff>=0.5", "scikit-learn>=1.2", "pyarrow>=12", "matplotlib>=3.5", "orjson>=3.9", "holidays>=0.40", "polars>=0.20"]
 

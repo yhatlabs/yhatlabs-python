@@ -29,7 +29,7 @@ def test_fit_once_predict_many(client, api, table):
         res = m.predict(table[["age", "city"]].iloc[:5])
         assert res.fit_id == m.id and list(res.probabilities.columns) == [0.0, 1.0]
     sent = [r for r in api.requests[n_before:]]
-    assert all(r[1] == f"/v1/fits/{m.id}/predict" and "train" not in r[2] for r in sent)  # only the rows to score
+    assert all(r[1] == f"/v1/table/fits/{m.id}/predict" and "train" not in r[2] for r in sent)  # only the rows to score
     assert isinstance(res.predictions.iloc[0], float)  # labels restored to the training type
     with pytest.raises(DataError, match="missing feature columns"):
         m.predict(table[["age"]])
@@ -75,7 +75,7 @@ def test_old_gateway_without_fits(client, api, table, monkeypatch):
     monkeypatch.setattr(ChakraTabClassifier, "_client", lambda self: client)
     clf = ChakraTabClassifier().fit(table[["age"]], table.churn)
     assert clf.fit_ is None and len(clf.predict(table[["age"]])) == 60  # falls back to one-shot calls
-    assert api.requests[-1][1] == "/v1/tabular/predict"
+    assert api.requests[-1][1] == "/v1/table/predict"
 
 
 def test_sklearn_uses_one_fit(client, api, table, monkeypatch):
@@ -89,7 +89,7 @@ def test_sklearn_uses_one_fit(client, api, table, monkeypatch):
     reg.predict(table[["age"]].iloc[10:20])
     q = reg.predict_quantiles(table[["age"]].iloc[10:14], (0.1, 0.9))
     assert list(q.columns) == ["q10", "q90"] and list(q.index) == [10, 11, 12, 13]
-    assert [r[1] for r in api.requests[n:]] == [f"/v1/fits/{reg.fit_.id}/predict"] * 3
+    assert [r[1] for r in api.requests[n:]] == [f"/v1/table/fits/{reg.fit_.id}/predict"] * 3
     assert list(reg.importance().feature) == ["age"]
     clone = pickle.loads(pickle.dumps(reg))
     assert clone.fit_.id == reg.fit_.id
