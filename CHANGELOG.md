@@ -2,6 +2,7 @@
 
 ## 0.2.0 (2026-10-15)
 
+- `to_polars()` without polars installed says what to install instead of raising a bare `ModuleNotFoundError`.
 - A model that is starting up (its first call after a quiet period) is waited for, up to 5 minutes, instead of failing
   after the usual retries.
 - **Breaking:** the API paths name the input, then the task: `POST /v1/series/forecast`, `POST /v1/table/predict` and

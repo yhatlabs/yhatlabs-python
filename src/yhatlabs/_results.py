@@ -9,6 +9,16 @@ import numpy as np
 import pandas as pd
 
 
+def _polars() -> Any:
+    try:
+        import polars as pl
+    except ImportError as e:
+        from ._errors import ConfigurationError
+
+        raise ConfigurationError("to_polars() needs polars: pip install polars") from e
+    return pl
+
+
 def _prob(values: pd.DataFrame, levels: List[float], above: Any, below: Any) -> np.ndarray:
     """P(Y > above) or P(Y < below) per row, from the row's quantile columns (cdf_at)."""
     from ._errors import DataError
@@ -82,8 +92,7 @@ class ForecastResult:
         return s.pivot(index="sample", columns=s.columns[1], values="value").to_numpy()
 
     def to_polars(self) -> Any:
-        import polars as pl
-
+        pl = _polars()
         return pl.from_pandas(self.df)
 
     def _repr_html_(self) -> str:
@@ -238,8 +247,7 @@ class PredictionResult:
         return self.checks.novelty() if self.checks is not None else None
 
     def to_polars(self) -> Any:
-        import polars as pl
-
+        pl = _polars()
         return pl.from_pandas(self.df.reset_index())
 
     def __repr__(self) -> str:
