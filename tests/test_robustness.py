@@ -118,3 +118,28 @@ def test_large_bodies_gzip_only_when_the_api_says_so(client, api):
     assert client._t.gzip
     client.limits = Limits()
     assert not client._t.gzip
+
+
+def test_a_model_starting_up_is_waited_out_beyond_max_retries(client, api, hourly, monkeypatch):
+    from yhatlabs import _transport
+
+    monkeypatch.setattr(_transport, "_waking_wait", lambda until: 0.0)
+    waking = {
+        "error": {
+            "type": "model_unavailable",
+            "message": "The model is temporarily unavailable. It may be starting up; retry in a minute or two.",
+        }
+    }
+    api.script = [(503, waking)] * 6  # more than max_retries (3)
+    fc = client.forecast(hourly, h=6)
+    assert len(fc.df) == 12
+
+
+def test_other_503s_stop_at_max_retries(client, api, hourly):
+    import pytest
+
+    from yhatlabs import ServiceUnavailableError
+
+    api.script = [(503, {"error": {"type": "model_unavailable", "message": "The model did not answer in time."}})] * 6
+    with pytest.raises(ServiceUnavailableError):
+        client.forecast(hourly, h=6)

@@ -150,6 +150,18 @@ def _is_streamed(resp: httpx.Response) -> bool:
     return resp.status_code == 200 and _streamed_error(_json(resp)) is not None
 
 
+COLD_START_S = 300.0  # a model scaled to zero takes a few minutes to start; its 503s are waited out this long
+
+
+def _waking(resp: httpx.Response) -> bool:
+    """A 503 sent before the call reached the model (it is starting), as opposed to one after a long fit."""
+    return resp.status_code == 503 and "starting up" in str(((_json(resp) or {}).get("error") or {}).get("message", ""))
+
+
+def _waking_wait(until: float) -> float:
+    return max(0.0, min(15.0, until - time.monotonic()))
+
+
 def _should_retry(resp: httpx.Response, streamed_retries: int = 0) -> bool:
     status = resp.status_code
     if status == 200:
@@ -226,8 +238,9 @@ class SyncTransport:
         url = f"{self.base_url}{path}"
         body, headers = _prepare(method, json, self.headers(), self.gzip)
         last_resp: Optional[httpx.Response] = None
-        streamed_retries = 0
-        for attempt in range(self.max_retries + 1):
+        streamed_retries, waking_until = 0, None
+        attempt = 0
+        while attempt <= self.max_retries:
             t0 = time.monotonic()
             try:
                 resp = self.http.request(
@@ -241,19 +254,27 @@ class SyncTransport:
                 _log(method, path, None, t0, attempt, "timed out")
                 if attempt < self.max_retries:
                     time.sleep(_backoff(attempt, None))
+                    attempt += 1
                     continue
                 raise APITimeoutError(f"The request to {path} timed out after {self.timeout:.0f}s.") from e
             except httpx.TransportError as e:
                 _log(method, path, None, t0, attempt, f"connection error: {type(e).__name__}")
                 if attempt < self.max_retries:
                     time.sleep(_backoff(attempt, None))
+                    attempt += 1
                     continue
                 raise APIConnectionError(f"Could not reach {self.base_url}: {e}") from e
             last_resp = resp
             _log(method, path, resp, t0, attempt)
+            if _waking(resp):  # waited out apart from max_retries, up to COLD_START_S
+                waking_until = waking_until or time.monotonic() + COLD_START_S
+                if time.monotonic() < waking_until:
+                    time.sleep(_waking_wait(waking_until))
+                    continue
             if attempt < self.max_retries and _should_retry(resp, streamed_retries):
                 streamed_retries += _is_streamed(resp)
                 time.sleep(_backoff(attempt, resp))
+                attempt += 1
                 continue
             return _decode(resp)
         return _decode(last_resp)  # pragma: no cover
@@ -309,8 +330,9 @@ class AsyncTransport:
         url = f"{self.base_url}{path}"
         body, headers = _prepare(method, json, self.headers(), self.gzip)
         last_resp: Optional[httpx.Response] = None
-        streamed_retries = 0
-        for attempt in range(self.max_retries + 1):
+        streamed_retries, waking_until = 0, None
+        attempt = 0
+        while attempt <= self.max_retries:
             t0 = time.monotonic()
             try:
                 resp = await self.http.request(
@@ -324,19 +346,27 @@ class AsyncTransport:
                 _log(method, path, None, t0, attempt, "timed out")
                 if attempt < self.max_retries:
                     await asyncio.sleep(_backoff(attempt, None))
+                    attempt += 1
                     continue
                 raise APITimeoutError(f"The request to {path} timed out after {self.timeout:.0f}s.") from e
             except httpx.TransportError as e:
                 _log(method, path, None, t0, attempt, f"connection error: {type(e).__name__}")
                 if attempt < self.max_retries:
                     await asyncio.sleep(_backoff(attempt, None))
+                    attempt += 1
                     continue
                 raise APIConnectionError(f"Could not reach {self.base_url}: {e}") from e
             last_resp = resp
             _log(method, path, resp, t0, attempt)
+            if _waking(resp):
+                waking_until = waking_until or time.monotonic() + COLD_START_S
+                if time.monotonic() < waking_until:
+                    await asyncio.sleep(_waking_wait(waking_until))
+                    continue
             if attempt < self.max_retries and _should_retry(resp, streamed_retries):
                 streamed_retries += _is_streamed(resp)
                 await asyncio.sleep(_backoff(attempt, resp))
+                attempt += 1
                 continue
             return _decode(resp)
         return _decode(last_resp)  # pragma: no cover

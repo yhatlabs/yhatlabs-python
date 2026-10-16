@@ -89,7 +89,8 @@ def _nn(a: Dict[str, np.ndarray], b: Dict[str, np.ndarray], skip_self: bool = Fa
     bsq = (bn**2).sum(axis=1)
     for i in range(0, len(out), CHUNK):
         an, ac = a["num"][i : i + CHUNK], a["cat"][i : i + CHUNK]
-        d2 = (an**2).sum(axis=1)[:, None] + bsq[None, :] - 2 * an @ bn.T
+        with np.errstate(all="ignore"):  # numpy 2.0 on macOS (Accelerate) warns on finite matmuls; the values are right
+            d2 = (an**2).sum(axis=1)[:, None] + bsq[None, :] - 2 * an @ bn.T
         for j in range(ac.shape[1]):
             d2 += (ac[:, j : j + 1] != bc[None, :, j]) | (ac[:, j : j + 1] < 0)
         if skip_self:

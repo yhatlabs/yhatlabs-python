@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-15)
 
+- A model that is starting up (its first call after a quiet period) is waited for, up to 5 minutes, instead of failing
+  after the usual retries.
 - **Breaking:** the API paths name the input, then the task: `POST /v1/series/forecast`, `POST /v1/table/predict` and
   `/v1/table/fits/...`. Releases up to 0.1.1 call the old paths, which the API no longer serves.
 - `mask_columns=True` (on `Client`, `with_options` or any call that sends a table or series) sends column names as `c0`, `c1`,
