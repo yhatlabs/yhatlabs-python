@@ -3,6 +3,7 @@
 ## 0.2.0 (2026-10-15)
 
 - `orjson` is now a default dependency, for faster encoding of large requests (the `[fast]` extra now adds pyarrow only).
+- The scikit-learn estimators have `get_params()` and `set_params()` without scikit-learn installed.
 - `to_polars()` without polars installed says what to install instead of raising a bare `ModuleNotFoundError`.
 - A model that is starting up (its first call after a quiet period) is waited for, up to 5 minutes, instead of failing
   after the usual retries.
