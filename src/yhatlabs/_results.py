@@ -231,6 +231,7 @@ class PredictionResult:
     mean: Optional[pd.Series] = (
         None  # regression with a per-row distribution: its mean (the prediction column is the fit's point)
     )
+    comparison: Any = field(default=None, repr=False, compare=False)  # compare=: the standard models (a Comparison)
 
     @property
     def out_of_range(self) -> Optional[pd.Series]:

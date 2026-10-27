@@ -225,9 +225,11 @@ model.importance(holdout)
 | See how one column moves the prediction | `model.effect("temperature")` |
 | See which columns matter | `model.importance(holdout)` |
 | Reuse a fit later, anywhere | `model.save("model.json")`, then `yhatlabs.load("model.json")` |
-| Predict once, keeping nothing | `yh.predict(train, target, test)` |
+| Predict once, without saving a fit | `yh.predict(train, target, test)` |
 | Fill missing cells | `yh.impute(df)` |
 | Use it in scikit-learn | `ChakraTabClassifier()`, `ChakraTabRegressor()` |
+| Compare with standard models on the same rows | `yh.predict(train, target, test, compare=True)`, then `res.comparison.score(actual, ChakraTab=res)` |
+| Run a large table in the background | `job = yh.fit(train, target, background=True)`, then `job.wait()` |
 | Know the cost before you run | `yh.estimate_table(train, target=..., test=...)` |
 
 ### Fitting, intervals and importance
@@ -235,8 +237,8 @@ model.importance(holdout)
 A fit stays available so you can score new rows as they arrive, explain the model, and share it with a teammate, without
 sending the training data again.
 
-- **Lifetime:** a fit is kept for `ttl_hours` (default 24, up to 168), or until `model.delete()`. A `with yh.fit(...) as
-  model:` block deletes it on exit. `model.save(path)` writes a small record, with no training data, that `yhatlabs.load()`
+- **Lifetime:** a fit is kept 30 days after its last use (each prediction renews it; `ttl_days=` sets 1 to 365), or
+  until `model.delete()`. A `with yh.fit(...) as model:` block deletes it on exit. `model.save(path)` writes a small record, with no training data, that `yhatlabs.load()`
   reattaches anywhere.
 - **Classes and numbers:** classification returns `predictions` and `probabilities`, and with `set_coverage=` a set of
   classes per row that holds the true one that often. Regression returns `predictions` and, with `quantiles=`, an interval
@@ -244,8 +246,10 @@ sending the training data again.
   Pass `task="classify"` or `task="regress"` for integer targets, which could be either.
 - **Rows that belong together:** with `groups="machine"` (or `time_col=` for rows over time), validation holds out whole
   groups or later periods, so scores and intervals hold for groups the model has not seen.
-- **Presets:** `fast` is the default; `medium` is more accurate and about 3x slower. `eval_metric=`, `time_limit=` and
-  `seed=` are also accepted.
+- **Presets:** `fast` is the default; `medium` is more accurate and about 3x slower; `pro` is the most accurate.
+  `eval_metric=`, `time_limit=` and `seed=` are also accepted.
+- **Large tables:** a table larger than a direct call takes runs as a background job, and the call waits for it, so the
+  result is the same. `background=True` returns the job at once instead (`job.status()`, `job.wait()`, `job.cancel()`).
 - **Importance:** how much the score drops when a column is shuffled. Labeled rows the model has not seen give the most honest
   numbers.
 
@@ -369,6 +373,7 @@ Your inputs are sent to the YHat Labs API to be processed.
 - **Fits:** a fitted model keeps its training table only until it expires or you delete it.
 - **Large tables:** with the `[parquet]` extra, tables over 8 MB are uploaded once and reused by reference.
 - **Column names:** `mask_columns=True` keeps them on your machine; values are sent as they are.
+- **Logs:** `store=False` on a call keeps it out of your Logs.
 - **More:** see [SECURITY.md](SECURITY.md) for how keys and data are handled, and how to report a security issue.
 
 </details>

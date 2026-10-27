@@ -56,10 +56,13 @@ m.predict(test, set_coverage=0.9).prediction_sets  # classification: the classes
 m.effect("temperature")  # how the prediction moves with one column
 m.importance(holdout)  # permutation importance per column
 yh.fit(train, ["strength", "pass"])  # several targets, one FitGroup
-yh.estimate_table(train, target="target", test=test, preset="medium")  # credits before running
+yh.estimate_table(train, target="target", test=test, preset="medium")  # credits before running (decimals, e.g. 0.02)
 m.save("model.json")
 yhatlabs.load("model.json")
-yh.predict(train, "target", test)  # one-shot, nothing kept
+yh.predict(train, "target", test)  # one-shot, no fit saved
+res = yh.predict(train, "target", test, compare=True)  # also LightGBM, XGBoost, random forest, linear, a baseline
+res.comparison.score(actual, ChakraTab=res)  # every model scored the same way on the test rows
+job = yh.fit(train, "target", preset="pro", background=True)  # returns at once; job.wait() gives the model
 ```
 
 Plots: `from yhatlabs import plots` then `plots.forecast(fc, history=df)`, `plots.backtest(ev)`, `plots.reliability(ev_table)`,
@@ -82,4 +85,7 @@ yhatlabs whoami
 - Pass `task="classify"` or `task="regress"` for integer targets.
 - Rows grouped by machine, batch, patient or store: pass `groups=`; rows over time: `time_col=` (or validate on later rows).
 - Report uncertainty with the numbers the result gives (coverage, intervals, novelty), not a single point.
-- Large tables are uploaded once automatically; nothing else to do.
+- Large tables are uploaded once automatically, and a table too large for a direct call runs as a background job that the
+  call waits for; nothing else to do.
+- Presets: "fast" (default), "medium", "pro" (most accurate, slowest).
+- `store=False` on a call: it isn't shown in the user's Logs.

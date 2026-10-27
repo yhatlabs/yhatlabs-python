@@ -28,7 +28,7 @@ SHARED = {
     "test": "The rows to predict, with the same feature columns as train. Without it, the rows of train whose target is empty "
     "are predicted.",
     "task": '"classify", "regress", or None to let the server infer it. Pass it for integer targets (a 1-5 rating could be either).',
-    "preset": '"fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).',
+    "preset": '"fast" (default: one holdout split, the quickest), "medium" (3-fold bagging, about 3x the time) or "pro" (8-fold bagging, the most accurate; "full" is the same).',
     "eval_metric": "What validation optimises: log_loss (default), roc_auc, f1, ... for classification; rmse (default), mae, r2 "
     "for regression.",
     "time_limit": "Seconds for the whole call.",

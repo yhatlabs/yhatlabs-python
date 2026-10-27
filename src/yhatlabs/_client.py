@@ -16,10 +16,12 @@ import numpy as np
 import pandas as pd
 from pandas.util import hash_pandas_object
 
-from . import _anomaly, _evaluate, _profile, _table_eval, _tabular
+from . import _anomaly, _compare, _evaluate, _jobs, _profile, _table_eval, _tabular
+from ._compare import Comparison
 from ._errors import APIError, DataError, NotFoundError, UnsupportedError, YHatError
 from ._fits import AsyncFitGroup, AsyncFittedModel, FitGroup, FittedModel, _not_deployed
 from ._forecast import Item, Limits, Prepared, _pandas, batches, build_frame, prepare, resolve_quantiles, warn_all
+from ._jobs import AsyncJob, Job
 from ._mask import Mask, masked
 from ._results import EvaluationResult, ForecastResult, PredictionResult
 from ._table_eval import TableEvaluation
@@ -57,6 +59,56 @@ def _body(
         body["season"] = int(season)
     body.update(extra or {})
     return body
+
+
+def _fit_extras(body: dict, ttl_days: Optional[float], store: Optional[bool]) -> None:
+    if ttl_days is not None:
+        body.pop("ttl_hours", None)
+        body["ttl_days"] = float(ttl_days)
+    if store is False:
+        body["store"] = False
+
+
+def _estimate_counts(
+    train: Any,
+    target: Optional[str],
+    test: Any,
+    train_rows: Optional[int],
+    features: Optional[int],
+    predict_rows: Optional[int],
+) -> Tuple[int, int, int]:
+    if train is not None:
+        df = _tabular._frame(_pandas(train), "train")
+        train_rows = len(df) if train_rows is None else train_rows
+        features = (df.shape[1] - (1 if target in df.columns else 0)) if features is None else features
+    if test is not None:
+        predict_rows = len(_tabular._frame(_pandas(test), "test")) if predict_rows is None else predict_rows
+    return int(train_rows or 0), int(features or 1), int(predict_rows or 0)
+
+
+def _estimate_body(call: str, counts: Tuple[int, int, int], preset: Optional[str], task: Optional[str]) -> dict:
+    rows, features, test = counts
+    body = {"call": call, "train_rows": rows, "features": features, "preset": preset or "fast"}
+    if call == "predict":
+        body["rows"] = test
+    if task == "regress":
+        body["regression"] = True
+    return body
+
+
+def _estimate_result(fit: dict, pred: Optional[dict]) -> Dict[str, Any]:
+    f = float(fit.get("credits") or 0)
+    p = float((pred or {}).get("credits") or 0)
+    tokens = int(fit.get("tokens") or 0) + int((pred or {}).get("tokens") or 0)
+    return {"fit": f, "predict": p, "total": round(f + p, 6), "tokens": tokens, "unit": "credits"}
+
+
+def _compare_body(body: dict, models: Optional[List[str]]) -> dict:
+    """The /v1/table/compare request for a table predict: the same tables and target, without the fit's options."""
+    out = {k: body[k] for k in ("model", "target", "train", "test", "problem_type", "store") if k in body}
+    if models is not None:
+        out["models"] = models
+    return out
 
 
 def _forecast_extra(limits: Limits, quantiles: Any, samples: Optional[int], seed: Optional[int], history: bool) -> dict:
@@ -177,6 +229,8 @@ def _forecast_result(
     )
     frame = build_frame(kept, {it.uid: o for it, o in zip(items, outs) if o is not None}, native, levels, mean)
     usage = {"series": sum(int((r.get("usage") or {}).get("series", 0)) for r in replies), "requests": len(replies)}
+    if any("credits" in (r.get("usage") or {}) for r in replies):
+        usage["credits"] = round(sum(float((r.get("usage") or {}).get("credits") or 0) for r in replies), 6)
     warns = list(prep.warnings) + [f"{len(e['ids'])} series failed ({e['error']}); see result.errors." for e in errors]
     return ForecastResult(
         frame,
@@ -361,6 +415,34 @@ class _Base:
     def __repr__(self) -> str:
         return f"{type(self).__name__}(base_url={self.base_url!r})"
 
+    def _direct(self, preset: Optional[str], tr: pd.DataFrame, target: str, groups: Optional[str]) -> bool:
+        """Whether the training table gets a direct answer, by the sizes /v1/limits publishes (else it runs as a job)."""
+        return self.limits.direct_fits(preset, len(tr), len(_tabular.features_of(tr, target, groups)))
+
+    def _compare_request(
+        self,
+        train: Any,
+        target: str,
+        test: Any,
+        models: Any,
+        model: str,
+        task: Optional[str],
+        store: Optional[bool],
+        mask_columns: Optional[bool],
+    ) -> Tuple[dict, pd.Index, Optional[Mask]]:
+        picked = _compare.check_models(models)
+        tr, te, pt, _, _, _ = _tabular.prepare(
+            train, target, test, task=task, preset=None, quantiles=None, limits=self.limits
+        )
+        m = Mask.of([*tr.columns, *te.columns]) if self._masking(mask_columns) else None
+        wtr, wte = (m.frame(tr), m.frame(te)) if m else (tr, te)
+        body = _tabular.payload(
+            model, wtr, m.name(target) if m else target, wte, pt, None, None, None, None, self.limits.max_tabular_bytes
+        )
+        if store is False:
+            body["store"] = False
+        return _compare_body(body, picked), te.index, m
+
 
 class Client(_Base):
     """Synchronous client for the YHat Labs prediction API.
@@ -495,6 +577,7 @@ class Client(_Base):
         seed: Optional[int] = None,
         history: bool = False,
         mask_columns: Optional[bool] = None,
+        store: Optional[bool] = None,
     ) -> ForecastResult:
         """Forecast the next `h` steps of every series in `data`.
 
@@ -514,6 +597,7 @@ class Client(_Base):
             samples: Return this many sample paths per series (1 to 1000) in result.samples.
             seed: Random seed for the sample paths.
             history: Also return the model's forecasts of the windows just before the forecast (result.history).
+            store: False: the call isn't shown in your Logs (see the data-handling page in the docs).
             mask_columns: Send target and covariate names as c0, c1, ...; the result keeps your names. Default: the client's
                 setting (False).
             calendar: True adds hour, weekday, month and weekend as known covariates (no future= needed for them);
@@ -544,6 +628,8 @@ class Client(_Base):
         data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq, target_col)
         quantiles = _levels(quantiles, level)
         extra = _forecast_extra(self.limits, quantiles, samples, seed, history)
+        if store is False:
+            extra["store"] = False
         prep = _prep(
             data,
             h,
@@ -864,17 +950,20 @@ class Client(_Base):
         groups: Optional[str] = None,
         time_col: Optional[str] = None,
         set_coverage: Optional[float] = None,
+        compare: Any = None,
+        store: Optional[bool] = None,
+        background: bool = False,
         _refs: Optional[Dict[str, dict]] = None,
         mask_columns: Optional[bool] = None,
         _mask: Optional[Mask] = None,
-    ) -> PredictionResult:
-        """Fit on `train` and predict `test` in one call (nothing is kept; to predict again from the same fit, use fit()).
+    ) -> Union[PredictionResult, Job]:
+        """Fit on `train` and predict `test` in one call (to predict again from the same fit, use fit()).
 
         Without test=, the rows of `train` whose target is missing are predicted.
         task: "classify", "regress" or None to let the server infer it. Pass it for integer targets: a rating from 1 to 5 or a
         small count may otherwise be inferred as classification.
         preset: "fast" (the default: one holdout split), "medium" (3-fold bagging, about 3x slower and more accurate; what our
-        TabArena numbers use) or "full". eval_metric: what validation optimises, e.g. log_loss (default), roc_auc, f1; rmse
+        TabArena numbers use) or "pro" (8-fold bagging). eval_metric: what validation optimises, e.g. log_loss (default), roc_auc, f1; rmse
         (default), mae, r2 for regression. It does not change the decision rule. quantiles: regression prediction intervals,
         e.g. [0.05, 0.5, 0.95] (split-conformal on out-of-sample errors). time_limit: seconds for the whole call. seed: the
         server uses 0 when omitted, so results are already reproducible.
@@ -890,7 +979,7 @@ class Client(_Base):
             groups: A column whose rows belong together (machine, batch, patient, store): validation folds hold out
                 whole groups, so intervals hold for groups the model has not seen. The column is not used as a feature.
             model: The model name, as GET /v1/models lists it.
-            preset: "fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).
+            preset: "fast" (default: one holdout split, the quickest), "medium" (3-fold bagging, about 3x the time) or "pro" (8-fold bagging, the most accurate; "full" is the same).
             seed: Random seed; the server uses 0 when it is left out, so results are reproducible.
             set_coverage: Classification: return prediction sets that hold the true class this often, e.g. 0.9.
             target: The column to predict.
@@ -900,7 +989,14 @@ class Client(_Base):
                 target is empty are predicted.
             time_limit: Seconds for the whole call.
             train: The training table: one row per example, the target column included.
+            compare: Also train standard models on the same rows, for comparison: True for LightGBM, XGBoost, a random
+                forest and a linear model, or a list of them ("lightgbm", "xgboost", "random_forest", "linear"). Their
+                predictions, with a naive baseline, are in result.comparison; result.comparison.score(actual) scores them.
+            store: False: the call isn't shown in your Logs (see the data-handling page in the docs).
+            background: Return a Job at once instead of waiting: job.wait() gives the result. A table too large for a
+                direct call runs as a job anyway, and is waited for unless background=True.
         """
+        picked = _compare.check_models(compare) if compare else None
         tr, te, pt, q, warns, extra = _tabular.prepare(
             train,
             target,
@@ -932,37 +1028,53 @@ class Client(_Base):
             m.options(extra) if m else extra,
             refs,
         )
+        if store is False:
+            body["store"] = False
         t0 = time.monotonic()
+
+        def finish(reply: Any, comparison: Optional[Comparison]) -> PredictionResult:
+            res = _predict_result(
+                model,
+                reply,
+                te,
+                _tabular.label_values(tr[target]),
+                warns,
+                bool(q),
+            )
+            res.comparison = comparison
+            res.timing["total_s"] = round(time.monotonic() - t0, 3)
+            res.checks = _profile.Checks(_profile.build(tr, _tabular.features_of(tr, target, groups)), te)
+            res.provenance = _provenance(
+                self.base_url,
+                "/v1/table/predict",
+                model,
+                [res.request_id or ""],
+                train,
+                {
+                    "target": target,
+                    "task": task,
+                    "preset": preset,
+                    "eval_metric": eval_metric,
+                    "seed": seed,
+                    "quantiles": q,
+                    "rows": len(te),
+                },
+            )
+            warn_all(res.warnings)
+            return res
+
+        cmp_body = _compare_body(body, picked) if compare else None
+        if background:
+            with masked(m):
+                job = self._t.request("POST", "/v1/table/predict", {**body, "async": True})
+            comparison = self._comparison(cmp_body, te.index) if cmp_body else None
+            return Job(self._t, job, lambda reply: finish(reply, comparison))
         with masked(m):
-            reply = self._t.request("POST", "/v1/table/predict", body)
-        res = _predict_result(
-            model,
-            reply,
-            te,
-            _tabular.label_values(tr[target]),
-            warns,
-            bool(q),
-        )
-        res.timing["total_s"] = round(time.monotonic() - t0, 3)
-        res.checks = _profile.Checks(_profile.build(tr, _tabular.features_of(tr, target, groups)), te)
-        res.provenance = _provenance(
-            self.base_url,
-            "/v1/table/predict",
-            model,
-            [res.request_id or ""],
-            train,
-            {
-                "target": target,
-                "task": task,
-                "preset": preset,
-                "eval_metric": eval_metric,
-                "seed": seed,
-                "quantiles": q,
-                "rows": len(te),
-            },
-        )
-        warn_all(res.warnings)
-        return res
+            reply = _jobs.call(self._t, "/v1/table/predict", body, not self._direct(preset, tr, target, groups))
+        return finish(reply, self._comparison(cmp_body, te.index) if cmp_body else None)
+
+    def _comparison(self, body: dict, index: pd.Index) -> Comparison:
+        return _compare.from_reply(self._t.request("POST", "/v1/table/compare", body), index)
 
     def estimate_table(
         self,
@@ -974,10 +1086,11 @@ class Client(_Base):
         train_rows: Optional[int] = None,
         features: Optional[int] = None,
         predict_rows: Optional[int] = None,
+        task: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Credits a tabular call will cost, before making it: a fit on `train` (rows x feature columns, times the preset's
-        folds) plus predicting `test`. Pass tables, or the counts (train_rows, features, predict_rows). Uses the rates the API
-        publishes, so it stays right when they change. -> {"fit", "predict", "total", "unit"}
+        """Credits a tabular call will cost, before making it: a fit on `train` plus predicting `test`, priced by the API at
+        your organization's rates (POST /v1/estimate). Pass tables, or the counts (train_rows, features, predict_rows).
+        -> {"fit", "predict", "total", "tokens", "unit"}
 
         Args:
             train: The training table (or pass train_rows and features).
@@ -986,18 +1099,48 @@ class Client(_Base):
             train_rows: Training rows, when no table is passed.
             features: Feature columns, when no table is passed.
             predict_rows: Rows to predict, when no table is passed.
-            preset: "fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).
+            preset: "fast" (default: one holdout split, the quickest), "medium" (3-fold bagging, about 3x the time) or "pro" (8-fold bagging, the most accurate; "full" is the same).
+            task: "regress" adds what regression's per-row intervals cost.
         """
-        if train is not None:
-            df = _tabular._frame(_pandas(train), "train")
-            train_rows = len(df) if train_rows is None else train_rows
-            features = (df.shape[1] - (1 if target in df.columns else 0)) if features is None else features
-        if test is not None:
-            predict_rows = len(_tabular._frame(_pandas(test), "test")) if predict_rows is None else predict_rows
-        rates = (self.limits.pricing or {}).get("tabular") or {}
-        return _tabular.estimate(
-            rates, int(train_rows or 0), int(features or 1), preset or "fast", int(predict_rows or 0)
+        counts = _estimate_counts(train, target, test, train_rows, features, predict_rows)
+        fit = self._t.request("POST", "/v1/estimate", _estimate_body("fit", counts, preset, task))
+        pred = (
+            self._t.request("POST", "/v1/estimate", _estimate_body("predict", counts, preset, task))
+            if counts[2]
+            else None
         )
+        return _estimate_result(fit, pred)
+
+    def compare(
+        self,
+        train: Any,
+        target: str,
+        test: Any,
+        *,
+        models: Any = None,
+        model: str = DEFAULT_TAB_MODEL,
+        task: Optional[str] = None,
+        store: Optional[bool] = None,
+        mask_columns: Optional[bool] = None,
+    ) -> Comparison:
+        """Train standard models on `train` and predict `test` with each, to compare with ChakraTab on the same rows:
+        LightGBM, XGBoost, a random forest and a linear model, plus a naive baseline (the most common class, or the mean).
+        result.score(actual, ChakraTab=prediction) scores them side by side. A direct call: tables up to the direct size.
+
+        Args:
+            train: The training table: one row per example, the target column included.
+            target: The column to predict.
+            test: The rows to predict, with the same feature columns as train.
+            models: Which standard models: a list of "lightgbm", "xgboost", "random_forest", "linear". Default: all four.
+            model: The model name, as GET /v1/models lists it.
+            task: "classify", "regress", or None to let the server infer it.
+            store: False: the call isn't shown in your Logs (see the data-handling page in the docs).
+            mask_columns: Send column names as c0, c1, ...; results keep your names. Default: the client's setting
+                (False).
+        """
+        body, index, m = self._compare_request(train, target, test, models, model, task, store, mask_columns)
+        with masked(m):
+            return self._comparison(body, index)
 
     def _upload(self, raw: bytes) -> dict:
         """Sends a parquet file once (POST /v1/uploads, then the upload it names) and returns the table reference."""
@@ -1056,7 +1199,7 @@ class Client(_Base):
             eval_metric: What validation optimises: log_loss (default), roc_auc, f1, ... for classification; rmse
                 (default), mae, r2 for regression.
             model: The model name, as GET /v1/models lists it.
-            preset: "fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).
+            preset: "fast" (default: one holdout split, the quickest), "medium" (3-fold bagging, about 3x the time) or "pro" (8-fold bagging, the most accurate; "full" is the same).
             seed: Random seed; the server uses 0 when it is left out, so results are reproducible.
             target: The column to predict.
             task: "classify", "regress", or None to let the server infer it. Pass it for integer targets (a 1-5 rating
@@ -1117,10 +1260,13 @@ class Client(_Base):
         groups: Optional[str] = None,
         time_col: Optional[str] = None,
         mask_columns: Optional[bool] = None,
-    ) -> Union[FittedModel, FitGroup]:
+        ttl_days: Optional[float] = None,
+        store: Optional[bool] = None,
+        background: bool = False,
+    ) -> Union[FittedModel, FitGroup, Job]:
         """Fit once on our side and get a handle to predict (with intervals for regression) and explain as often as you like;
-        each prediction sends only the rows to score. The fit is kept for ttl_hours (default 24, at most 168) or until
-        .delete(); `with yh.fit(...) as m:` deletes it on exit. Options as in predict().
+        each prediction sends only the rows to score. The fit is kept 30 days after its last use (each prediction renews it;
+        ttl_days= sets 1 to 365) or until .delete(); `with yh.fit(...) as m:` deletes it on exit. Options as in predict().
         profile=True keeps a summary of the training table on the handle (ranges, categories, up to 2,000 sample rows), so
         predictions report out_of_range and novelty; it stays on your machine (and in .save() records). False drops it.
         target=[...] fits each target on the features alone (the other targets left out) and returns a FitGroup that predicts,
@@ -1130,7 +1276,10 @@ class Client(_Base):
             mask_columns: Send column names as c0, c1, ...; results keep your names. Default: the client's setting
                 (False).
             target: The column to predict, or a list of columns: one fit per target, returned as a FitGroup.
-            ttl_hours: How long the fit is kept, at most 168. Default: 24.
+            ttl_days: How many days the fit is kept after its last use, 1 to 365. Default: 30.
+            ttl_hours: The same in hours (ttl_days takes precedence).
+            store: False: the call isn't shown in your Logs (see the data-handling page in the docs).
+            background: Return a Job at once instead of waiting: job.wait() gives the fitted model. One target only.
             profile: Keep a summary of the training table on the handle for out_of_range and novelty (stays on your
                 machine).
             time_col: A column of times: validation folds are contiguous periods of it. It stays a feature.
@@ -1139,7 +1288,7 @@ class Client(_Base):
             groups: A column whose rows belong together (machine, batch, patient, store): validation folds hold out
                 whole groups, so intervals hold for groups the model has not seen. The column is not used as a feature.
             model: The model name, as GET /v1/models lists it.
-            preset: "fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).
+            preset: "fast" (default: one holdout split, the quickest), "medium" (3-fold bagging, about 3x the time) or "pro" (8-fold bagging, the most accurate; "full" is the same).
             seed: Random seed; the server uses 0 when it is left out, so results are reproducible.
             task: "classify", "regress", or None to let the server infer it. Pass it for integer targets (a 1-5 rating
                 could be either).
@@ -1155,11 +1304,15 @@ class Client(_Base):
                 time_limit=time_limit,
                 seed=seed,
                 ttl_hours=ttl_hours,
+                ttl_days=ttl_days,
+                store=store,
                 profile=profile,
                 groups=groups,
                 time_col=time_col,
                 mask_columns=mask_columns,
             )
+            if background:
+                raise DataError("background=True fits one target at a time.")
             frame = _tabular._frame(_pandas(train), "train")
             made: Dict[str, FittedModel] = {}
 
@@ -1200,21 +1353,29 @@ class Client(_Base):
             m.options(extra) if m else extra,
             self._refs(train=wtr),
         )
+        _fit_extras(body, ttl_days, store)
+
+        def finish(reply: Any) -> FittedModel:
+            fm = FittedModel.from_reply(
+                reply, _tabular.features_of(tr, target, groups), _tabular.label_values(tr[target]), self
+            )
+            fm.profile = _profile.build(tr, fm.features or []) if profile else None
+            if m:
+                fm.target, fm.mask = target, m.wire
+            return fm
+
         try:
             with masked(m):
-                reply = self._t.request("POST", "/v1/table/fits", body)
+                if background:
+                    job = self._t.request("POST", "/v1/table/fits", {**body, "async": True})
+                else:
+                    reply = _jobs.call(self._t, "/v1/table/fits", body, not self._direct(preset, tr, target, groups))
         except NotFoundError as e:
             if e.type == "not_found":
                 raise _not_deployed(e) from e
             raise
         warn_all(warns)
-        fm = FittedModel.from_reply(
-            reply, _tabular.features_of(tr, target, groups), _tabular.label_values(tr[target]), self
-        )
-        fm.profile = _profile.build(tr, fm.features or []) if profile else None
-        if m:
-            fm.target, fm.mask = target, m.wire
-        return fm
+        return Job(self._t, job, finish) if background else finish(reply)
 
     def get_fit(self, fit_id: str) -> FittedModel:
         """Reattach to a fit by id (labels come back as text unless the handle was pickled)."""
@@ -1242,7 +1403,7 @@ class Client(_Base):
             df: The table with missing values.
             columns: Which columns to fill. Default: every column with missing values.
             model: The model name, as GET /v1/models lists it.
-            preset: "fast" (default), "medium" (3-fold bagging, about 3x the time, more accurate) or "full" (8 folds).
+            preset: "fast" (default: one holdout split, the quickest), "medium" (3-fold bagging, about 3x the time) or "pro" (8-fold bagging, the most accurate; "full" is the same).
         """
         out = df.copy()
         filled = pd.DataFrame(False, index=df.index, columns=df.columns)
@@ -1369,11 +1530,14 @@ class AsyncClient(_Base):
         seed: Optional[int] = None,
         history: bool = False,
         mask_columns: Optional[bool] = None,
+        store: Optional[bool] = None,
     ) -> ForecastResult:
         t0 = time.monotonic()
         data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq, target_col)
         quantiles = _levels(quantiles, level)
         extra = _forecast_extra(self.limits, quantiles, samples, seed, history)
+        if store is False:
+            extra["store"] = False
         prep = _prep(
             data,
             h,
@@ -1493,10 +1657,14 @@ class AsyncClient(_Base):
         groups: Optional[str] = None,
         time_col: Optional[str] = None,
         set_coverage: Optional[float] = None,
+        compare: Any = None,
+        store: Optional[bool] = None,
+        background: bool = False,
         _refs: Optional[Dict[str, dict]] = None,
         mask_columns: Optional[bool] = None,
         _mask: Optional[Mask] = None,
-    ) -> PredictionResult:
+    ) -> Union[PredictionResult, AsyncJob]:
+        picked = _compare.check_models(compare) if compare else None
         tr, te, pt, q, warns, extra = _tabular.prepare(
             train,
             target,
@@ -1528,37 +1696,70 @@ class AsyncClient(_Base):
             m.options(extra) if m else extra,
             refs,
         )
+        if store is False:
+            body["store"] = False
         t0 = time.monotonic()
+
+        def finish(reply: Any, comparison: Optional[Comparison]) -> PredictionResult:
+            res = _predict_result(
+                model,
+                reply,
+                te,
+                _tabular.label_values(tr[target]),
+                warns,
+                bool(q),
+            )
+            res.comparison = comparison
+            res.timing["total_s"] = round(time.monotonic() - t0, 3)
+            res.checks = _profile.Checks(_profile.build(tr, _tabular.features_of(tr, target, groups)), te)
+            res.provenance = _provenance(
+                self.base_url,
+                "/v1/table/predict",
+                model,
+                [res.request_id or ""],
+                train,
+                {
+                    "target": target,
+                    "task": task,
+                    "preset": preset,
+                    "eval_metric": eval_metric,
+                    "seed": seed,
+                    "quantiles": q,
+                    "rows": len(te),
+                },
+            )
+            warn_all(res.warnings)
+            return res
+
+        cmp_body = _compare_body(body, picked) if compare else None
+        if background:
+            with masked(m):
+                job = await self._t.request("POST", "/v1/table/predict", {**body, "async": True})
+            comparison = await self._comparison(cmp_body, te.index) if cmp_body else None
+            return AsyncJob(self._t, job, lambda reply: finish(reply, comparison))
         with masked(m):
-            reply = await self._t.request("POST", "/v1/table/predict", body)
-        res = _predict_result(
-            model,
-            reply,
-            te,
-            _tabular.label_values(tr[target]),
-            warns,
-            bool(q),
-        )
-        res.timing["total_s"] = round(time.monotonic() - t0, 3)
-        res.checks = _profile.Checks(_profile.build(tr, _tabular.features_of(tr, target, groups)), te)
-        res.provenance = _provenance(
-            self.base_url,
-            "/v1/table/predict",
-            model,
-            [res.request_id or ""],
-            train,
-            {
-                "target": target,
-                "task": task,
-                "preset": preset,
-                "eval_metric": eval_metric,
-                "seed": seed,
-                "quantiles": q,
-                "rows": len(te),
-            },
-        )
-        warn_all(res.warnings)
-        return res
+            reply = await _jobs.acall(self._t, "/v1/table/predict", body, not self._direct(preset, tr, target, groups))
+        return finish(reply, await self._comparison(cmp_body, te.index) if cmp_body else None)
+
+    async def _comparison(self, body: dict, index: pd.Index) -> Comparison:  # type: ignore[override]
+        return _compare.from_reply(await self._t.request("POST", "/v1/table/compare", body), index)
+
+    async def compare(  # type: ignore[override]
+        self,
+        train: Any,
+        target: str,
+        test: Any,
+        *,
+        models: Any = None,
+        model: str = DEFAULT_TAB_MODEL,
+        task: Optional[str] = None,
+        store: Optional[bool] = None,
+        mask_columns: Optional[bool] = None,
+    ) -> Comparison:
+        """Client.compare."""
+        body, index, m = self._compare_request(train, target, test, models, model, task, store, mask_columns)
+        with masked(m):
+            return await self._comparison(body, index)
 
     async def _upload(self, raw: bytes) -> dict:  # type: ignore[override]
         sha = hashlib.sha256(raw).hexdigest()
@@ -1660,7 +1861,10 @@ class AsyncClient(_Base):
         groups: Optional[str] = None,
         time_col: Optional[str] = None,
         mask_columns: Optional[bool] = None,
-    ) -> Union[AsyncFittedModel, AsyncFitGroup]:
+        ttl_days: Optional[float] = None,
+        store: Optional[bool] = None,
+        background: bool = False,
+    ) -> Union[AsyncFittedModel, AsyncFitGroup, AsyncJob]:
         if not isinstance(target, str):
             targets = _targets(target, train)
             opts = dict(
@@ -1670,11 +1874,15 @@ class AsyncClient(_Base):
                 time_limit=time_limit,
                 seed=seed,
                 ttl_hours=ttl_hours,
+                ttl_days=ttl_days,
+                store=store,
                 profile=profile,
                 groups=groups,
                 time_col=time_col,
                 mask_columns=mask_columns,
             )
+            if background:
+                raise DataError("background=True fits one target at a time.")
             frame = _tabular._frame(_pandas(train), "train")
             outs = await asyncio.gather(
                 *[
@@ -1714,21 +1922,31 @@ class AsyncClient(_Base):
             m.options(extra) if m else extra,
             await self._refs(train=wtr),
         )
+        _fit_extras(body, ttl_days, store)
+
+        def finish(reply: Any) -> AsyncFittedModel:
+            fm = FittedModel.from_reply(
+                reply, _tabular.features_of(tr, target, groups), _tabular.label_values(tr[target]), self
+            )
+            fm.profile = _profile.build(tr, fm.features or []) if profile else None
+            if m:
+                fm.target, fm.mask = target, m.wire
+            return AsyncFittedModel(**{k: getattr(fm, k) for k in fm.__dataclass_fields__})
+
         try:
             with masked(m):
-                reply = await self._t.request("POST", "/v1/table/fits", body)
+                if background:
+                    job = await self._t.request("POST", "/v1/table/fits", {**body, "async": True})
+                else:
+                    reply = await _jobs.acall(
+                        self._t, "/v1/table/fits", body, not self._direct(preset, tr, target, groups)
+                    )
         except NotFoundError as e:
             if e.type == "not_found":
                 raise _not_deployed(e) from e
             raise
         warn_all(warns)
-        fm = FittedModel.from_reply(
-            reply, _tabular.features_of(tr, target, groups), _tabular.label_values(tr[target]), self
-        )
-        fm.profile = _profile.build(tr, fm.features or []) if profile else None
-        if m:
-            fm.target, fm.mask = target, m.wire
-        return AsyncFittedModel(**{k: getattr(fm, k) for k in fm.__dataclass_fields__})
+        return AsyncJob(self._t, job, finish) if background else finish(reply)
 
     async def models(self) -> List[Dict[str, Any]]:
         return (await self._t.request("GET", "/v1/models"))["models"]

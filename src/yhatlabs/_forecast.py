@@ -41,6 +41,16 @@ class Limits:
     pricing: Dict[str, Any] = field(
         default_factory=dict
     )  # what calls cost, as the API publishes it (estimate_table reads it)
+    tabular_direct: Dict[str, Dict[str, int]] = field(
+        default_factory=dict
+    )  # per preset, the largest table a direct call takes ({"rows", "columns"}); larger ones run as jobs
+    max_tabular_columns: Optional[int] = None
+    max_cells_async: Optional[int] = None
+
+    def direct_fits(self, preset: Optional[str], rows: int, columns: int) -> bool:
+        """Whether a table call of this size gets a direct answer (True when the API publishes no direct size)."""
+        d = self.tabular_direct.get({"full": "pro"}.get(preset or "fast", preset or "fast"))
+        return not d or (rows <= d.get("rows", rows) and columns <= d.get("columns", columns))
 
     @classmethod
     def from_api(cls, lim: dict) -> Limits:
@@ -56,6 +66,9 @@ class Limits:
             max_columns=f.get("max_columns", d.max_columns),
             capabilities=dict(lim.get("capabilities") or {}),
             pricing=dict(lim.get("pricing") or {}),
+            tabular_direct={k: dict(v) for k, v in (t.get("direct") or {}).items() if isinstance(v, dict)},
+            max_tabular_columns=t.get("max_columns"),
+            max_cells_async=t.get("max_cells_async"),
         )
 
     def supports(self, feature: str) -> bool:

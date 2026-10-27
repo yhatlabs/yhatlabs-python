@@ -24,7 +24,7 @@ EVAL_METRIC = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 EXACT_INT = 2**53  # larger ints lose precision as JSON numbers on the way through the gateway
 
 TASKS = ("classify", "regress")
-PRESETS = ("fast", "medium", "full")
+PRESETS = ("fast", "medium", "pro", "full")  # "pro" is the name the playground uses for "full"
 PARQUET_ABOVE_BYTES = 4 * 1024 * 1024  # JSON rows below this; parquet (when pyarrow is installed) above
 
 
@@ -449,16 +449,3 @@ def parse(
             np.asarray(reply["quantiles"], dtype=float), index=test.index, columns=[qname(lv) for lv in levels]
         )
     return out, None, None, q
-
-
-def estimate(rates: Dict[str, Any], train_rows: int, features: int, preset: str, predict_rows: int) -> Dict[str, Any]:
-    """Credits of a fit and a prediction under the API's published rates (GET /v1/limits, pricing.tabular)."""
-    if not rates:
-        raise UnsupportedError(
-            "This API publishes no tabular pricing; the estimate needs GET /v1/limits to include it."
-        )
-    lo = int(rates.get("min_credits", 1))
-    mult = (rates.get("preset_multiplier") or {}).get(preset, 1)
-    fit = max(lo, math.ceil(train_rows * max(1, features) / rates["fit_cells_per_credit"])) * mult if train_rows else 0
-    pred = max(lo, math.ceil(predict_rows / rates["predict_rows_per_credit"])) if predict_rows else 0
-    return {"fit": fit, "predict": pred, "total": fit + pred, "unit": rates.get("unit", "credits")}

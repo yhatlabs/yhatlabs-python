@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.1
+
+- Large tables run as background jobs. A fit or one-shot predict larger than a direct call takes (the sizes `GET /v1/limits`
+  publishes per preset) is sent as a job and waited for, so the result is the same; `background=True` returns a `Job` at
+  once instead (`job.status()`, `job.wait(timeout=)`, `job.cancel()`). A long call the API hands back as a job is waited
+  for too. Refs #13.
+- `compare=True` on `predict` (or `yh.compare(train, target, test)`) trains standard models on the same rows: LightGBM,
+  XGBoost, a random forest and a linear model, plus a naive baseline. `res.comparison.score(actual, ChakraTab=res)`
+  scores them all the same way.
+- `preset="pro"` is accepted (the same as `"full"`: 8-fold bagging, the most accurate).
+- `store=False` on `forecast`, `predict`, `fit` and `compare`: the call isn't shown in your Logs.
+- Credits are decimals (for example `usage["credits"] == 0.02`). `estimate_table()` asks the API (`POST /v1/estimate`)
+  instead of working the price out locally, and returns `tokens` too.
+- Fits are kept 30 days after their last use by default; `fit(..., ttl_days=)` sets 1 to 365. The docs said 24 hours.
+- Forecasts split over several requests report their credits added up in `fc.usage`.
+
 ## 0.2.0 (2026-10-15)
 
 - `orjson` is now a default dependency, for faster encoding of large requests (the `[fast]` extra now adds pyarrow only).

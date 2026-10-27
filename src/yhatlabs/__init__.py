@@ -2,6 +2,7 @@
 
 from ._check import DataCheck, check
 from ._client import AsyncClient, Client
+from ._compare import Comparison
 from ._errors import (
     APIConnectionError,
     APIError,
@@ -21,6 +22,7 @@ from ._errors import (
 )
 from ._fits import AsyncFitGroup, AsyncFittedModel, FitGroup, FittedModel, GroupPrediction, load
 from ._forecast import Limits
+from ._jobs import AsyncJob, Job, JobFailedError
 from ._results import EvaluationResult, ForecastResult, PredictionResult
 from ._table_eval import TableEvaluation
 from ._version import __version__
@@ -41,6 +43,9 @@ __all__ = [
     "PredictionResult",
     "EvaluationResult",
     "Limits",
+    "Job",
+    "AsyncJob",
+    "Comparison",
     "__version__",
     "YHatError",
     "ConfigurationError",
@@ -57,6 +62,7 @@ __all__ = [
     "RateLimitError",
     "InternalServerError",
     "ServiceUnavailableError",
+    "JobFailedError",
 ]
 
 

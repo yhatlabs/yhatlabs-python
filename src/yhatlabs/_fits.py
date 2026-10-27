@@ -1,6 +1,6 @@
 """Fitted tabular models: fit once on the server, predict and explain many times.
 
-A fit lives on our side until it expires (`ttl_hours`, default 24 h, at most 7 days) or you delete it; each prediction sends only
+A fit lives on our side 30 days after its last use (`ttl_days`, 1 to 365; each prediction renews it) or until you delete it; each prediction sends only
 the rows to score. The handle is picklable: it keeps the fit id and what it needs to check inputs and restore label types, and
 reattaches to a client with `bind()` (the scikit-learn estimators do this for you).
 """
