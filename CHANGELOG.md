@@ -27,6 +27,16 @@
   doesn't know. A horizon longer than the history warns, and warnings point at your own line.
 - `JobFailedError.job_id` names the job; `comparison.score()` adds ROC AUC for two classes.
 - CLI: `--json` also after the subcommand, `--preset pro`, `predict --compare`, `--no-store` on `predict` and `forecast`.
+- Spark, Dask, Ray and polars (DataFrame and LazyFrame) tables are accepted wherever a table is. A lazy or distributed
+  table sent as a tabular table is checked against the API's size first, and a larger one raises `DataError` before it
+  is collected. Closes #11.
+- `yh.anomaly_stream(window=512)` scores points as they arrive: `stream.update(new_points)` returns scores for the new
+  points only and keeps the last `window` points of every series (one `detect_anomalies` call per update). Closes #15.
+- `yh.explain_forecast(df, h, known=[...], past=[...])` shows how much each covariate moves the median, step by step,
+  with an average per covariate in `.attrs["summary"]`. It costs one extra forecast per covariate. Closes #10.
+- `yhatlabs.outliers(train, data)` scores rows by how unlike the training rows they are (novelty, an `outlier` flag and
+  the columns outside the training range); without `data`, each training row against the others. Local, no key needed.
+  Closes #17.
 
 ## 0.2.0 (2026-10-15)
 

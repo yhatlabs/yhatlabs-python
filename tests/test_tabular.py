@@ -174,3 +174,33 @@ def test_task_accepts_the_api_names():
     assert _tabular.problem_type(y, "regression") == _tabular.problem_type(y, "regress")
     assert _tabular.norm_task("classification") == "classify"
     assert _tabular.norm_task("binary") == "classify"
+
+
+def test_outliers_new_rows_and_leave_one_out():
+    import yhatlabs
+
+    rng = np.random.default_rng(0)
+    train = pd.DataFrame({"x": rng.normal(size=300), "z": rng.normal(size=300), "kind": rng.choice(["a", "b"], 300)})
+    new = pd.DataFrame({"x": [0.0, 9.0], "z": [0.0, 0.0], "kind": ["a", "c"]}, index=[10, 11])
+    out = yhatlabs.outliers(train, new)
+    assert list(out.index) == [10, 11] and list(out.columns) == ["novelty", "outlier", "out_of_range"]
+    assert out.outlier.tolist() == [False, True] and out.novelty[11] == 1.0
+    assert out.out_of_range[10] == [] and out.out_of_range[11] == ["x", "kind"]
+    far = train.copy()
+    far.loc[7, "x"] = 50.0
+    loo = yhatlabs.outliers(far, threshold=0.99)
+    assert len(loo) == 300 and loo.outlier[7] and loo.out_of_range[7] == ["x"]
+    assert loo.outlier.mean() <= 0.02  # about 1% of ordinary rows past the 99th percentile
+    assert yhatlabs.outliers(train.drop(columns="kind"), new).out_of_range[11] == ["x"]  # only shared columns
+    with pytest.raises(DataError, match="threshold"):
+        yhatlabs.outliers(train, threshold=99)
+
+
+def test_outliers_sample_larger_tables():
+    import yhatlabs
+
+    rng = np.random.default_rng(1)
+    train = pd.DataFrame({"x": rng.normal(size=2500)})
+    train.loc[0, "x"] = 40.0
+    loo = yhatlabs.outliers(train)
+    assert loo.outlier[0] and 0.003 < loo.outlier.mean() < 0.03

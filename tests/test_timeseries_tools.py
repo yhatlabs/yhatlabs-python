@@ -193,3 +193,87 @@ def test_cli_warnings_are_one_line(api, tmp_path, monkeypatch):
     assert main(["forecast", str(src), "--h", "3"]) == 0
     line = warnings.formatwarning("Filled 1 missing timestamps", UserWarning, "x.py", 1)
     assert line == "yhatlabs: warning: Filled 1 missing timestamps\n"
+
+
+def test_anomaly_stream_scores_only_new_points(client, api, hourly):
+    stream = client.anomaly_stream(window=50)
+    first = stream.update(hourly[hourly.ds < hourly.ds[72]])
+    assert first.empty and not any(r[1] == "/v1/series/forecast" for r in api.requests)  # nothing before them yet
+    new = hourly[(hourly.ds >= hourly.ds[72]) & (hourly.ds < hourly.ds[84])].copy()
+    spike = new.index[new.unique_id == "a"][5]
+    new.loc[spike, "y"] += 50
+    n = len(api.requests)
+    out = stream.update(new)
+    assert len(api.requests) == n + 1  # one call for every series
+    assert len(out) == 24 and set(out.ds) == set(new.ds)
+    assert out[out.anomaly].ds.tolist() == [new.loc[spike, "ds"]] and (out[out.anomaly].unique_id == "a").all()
+    assert (stream.history.groupby("unique_id").size() == 50).all()
+    assert len(stream.update(hourly[hourly.ds >= hourly.ds[84]])) == 24
+    with pytest.raises(DataError, match="window"):
+        client.anomaly_stream(window=3)
+
+
+def test_anomaly_stream_one_series_without_an_id(client, hourly):
+    stream = client.anomaly_stream()
+    a = hourly[hourly.unique_id == "a"].drop(columns="unique_id")
+    stream.update(a.iloc[:80])
+    out = stream.update(a.iloc[80:])
+    assert len(out) == 16 and (out.unique_id == "series_0").all()
+
+
+def test_explain_forecast_neutralises_one_covariate_at_a_time(client, monkeypatch):
+    from yhatlabs import ForecastResult
+
+    ts = pd.date_range("2026-01-01", periods=30, freq="D")
+    hist = pd.concat(
+        [
+            pd.DataFrame(
+                {"unique_id": u, "ds": ts, "y": 1.0, "price": p + np.arange(30.0), "promo": ["on"] * 20 + ["off"] * 10}
+            )
+            for u, p in (("a", 0.0), ("b", 100.0))
+        ],
+        ignore_index=True,
+    )
+    fut = make_future(hist, 3).assign(price=lambda f: f.unique_id.map({"a": 50.0, "b": 200.0}))
+    calls = []
+
+    def fake(data, h, *, known, past, future, **kw):
+        calls.append((data, future))
+        g = future.groupby("unique_id")
+        on = data.groupby("unique_id").promo.agg(lambda s: (s == "on").mean())
+        df = future[["unique_id", "ds"]].copy()
+        df["median"] = g.price.transform("mean") + 10 * df.unique_id.map(on)
+        return ForecastResult(df, "chakra-ts", "D", [0.5], [0.5])
+
+    monkeypatch.setattr(client, "forecast", fake)
+    out = client.explain_forecast(hist, 3, known=["price"], past=["promo"], future=fut)
+    assert len(calls) == 3  # one forecast, then one per covariate
+    neutral = calls[1][0].groupby("unique_id").price.unique()
+    mean_a = np.mean(np.r_[np.arange(30.0), [50.0] * 3])
+    assert np.allclose(neutral["a"], [mean_a]) and (calls[1][1].price[calls[1][1].unique_id == "a"] == mean_a).all()
+    assert (calls[2][0].promo == "on").all()  # the most common value
+    eff = out.set_index(["covariate", "unique_id"]).effect
+    assert np.allclose(eff.loc[("price", "a")], 50.0 - mean_a)
+    assert np.allclose(eff.loc[("promo", "a")], 10 * (20 / 30) - 10)
+    assert list(out.columns) == ["unique_id", "ds", "covariate", "median", "median_without", "effect"]
+    s = out.attrs["summary"]
+    assert list(s.columns) == ["covariate", "mean_abs_effect"] and s.mean_abs_effect.is_monotonic_decreasing
+    with pytest.raises(DataError, match="known"):
+        client.explain_forecast(hist, 3)
+
+
+def test_explain_forecast_end_to_end(client, api):
+    ts = pd.date_range("2026-01-01", periods=40, freq="D")
+    df = pd.DataFrame({"ds": ts, "y": np.arange(40.0), "temp": np.sin(np.arange(40.0))})
+    fut = make_future(df, 2).assign(temp=0.5)
+    out = client.explain_forecast(df, 2, known=["temp"], future=fut)
+    assert len(out) == 2 and (out.covariate == "temp").all()
+    assert sum(r[1] == "/v1/series/forecast" for r in api.requests) == 2
+
+
+async def test_async_explain_forecast(aclient, api):
+    df = pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=40, freq="D"), "y": 1.0, "temp": 2.0, "load": 3.0})
+    async with aclient as c:
+        out = await c.explain_forecast(df, 2, known=["temp"], past=["load"], future=make_future(df, 2).assign(temp=1.0))
+    assert set(out.covariate) == {"temp", "load"} and len(out) == 4
+    assert sum(r[1] == "/v1/series/forecast" for r in api.requests) == 3

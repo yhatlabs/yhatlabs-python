@@ -32,6 +32,10 @@ fc = yh.forecast(df, h=24, known=["temp"], future=future)  # future: id, time, t
 fc.to_wide()  # one column per series
 ev = yh.evaluate(df, h=24, windows=3)  # ev.summary (skill vs seasonal naive), ev.calibration, ev.plot()
 yh.detect_anomalies(df)  # score, anomaly per recent point
+stream = yh.anomaly_stream(window=512)  # stream.update(new_points): scores for the new points, one call per update
+yh.explain_forecast(
+    df, h=24, known=["temp"], future=future
+)  # effect of each covariate on the median; one forecast each
 yh.fill_gaps(df)  # fills missing values inside series
 
 from yhatlabs import hierarchy  # series that add up (stores -> regions -> total)
@@ -55,6 +59,7 @@ res.out_of_range, res.novelty  # where a row lies outside the training data (nov
 m.predict(test, set_coverage=0.9).prediction_sets  # classification: the classes that hold the true one 90% of the time
 m.effect("temperature")  # how the prediction moves with one column
 m.importance(holdout)  # permutation importance per column
+yhatlabs.outliers(train, test)  # novelty, outlier, out_of_range per row; local, no key
 yh.fit(train, ["strength", "pass"])  # several targets, one FitGroup
 yh.estimate_table(train, target="target", test=test, preset="medium")  # credits before running (decimals, e.g. 0.02)
 m.save("model.json")
@@ -83,6 +88,8 @@ yhatlabs whoami
 
 ## Rules
 - Errors raised before sending (`DataError`) say how to fix the input; API errors carry `.request_id`.
+- Tables can be pandas, polars, Spark, Dask or Ray; a distributed table too large for the API raises `DataError`: sample
+  or aggregate it first.
 - Pass `task="classify"` or `task="regress"` for integer targets.
 - Rows grouped by machine, batch, patient or store: pass `groups=`; rows over time: `time_col=` (or validate on later rows).
 - Report uncertainty with the numbers the result gives (coverage, intervals, novelty), not a single point.

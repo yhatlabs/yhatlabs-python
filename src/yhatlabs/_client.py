@@ -16,11 +16,22 @@ import numpy as np
 import pandas as pd
 from pandas.util import hash_pandas_object
 
-from . import _anomaly, _compare, _evaluate, _jobs, _profile, _table_eval, _tabular
+from . import _anomaly, _compare, _evaluate, _explain, _jobs, _profile, _table_eval, _tabular
 from ._compare import Comparison
 from ._errors import APIError, DataError, NotFoundError, UnsupportedError, YHatError
 from ._fits import AsyncFitGroup, AsyncFittedModel, FitGroup, FittedModel, _not_deployed
-from ._forecast import Item, Limits, Prepared, _pandas, batches, build_frame, prepare, resolve_quantiles, warn_all
+from ._forecast import (
+    Item,
+    Limits,
+    Prepared,
+    _lazy,
+    _pandas,
+    batches,
+    build_frame,
+    prepare,
+    resolve_quantiles,
+    warn_all,
+)
 from ._jobs import AsyncJob, Job
 from ._mask import Mask, masked
 from ._results import EvaluationResult, ForecastResult, PredictionResult
@@ -412,6 +423,10 @@ class _Base:
     def _masking(self, mask_columns: Optional[bool]) -> bool:
         return self.mask_columns if mask_columns is None else bool(mask_columns)
 
+    def _table(self, x: Any) -> Any:
+        """A Spark, Dask, Ray or polars lazy table in pandas, checked against the API's table size first; else unchanged."""
+        return _pandas(x, self.limits) if _lazy(x) else x
+
     def _key_hint(self) -> str:
         k = self._t.api_key
         return f"{k[:3]}...{k[-4:]}" if len(k) > 10 else "***"
@@ -434,6 +449,7 @@ class _Base:
         store: Optional[bool],
         mask_columns: Optional[bool],
     ) -> Tuple[dict, pd.Index, Optional[Mask]]:
+        train, test = self._table(train), self._table(test)
         picked = _compare.check_models(models)
         tr, te, pt, _, _, _ = _tabular.prepare(
             train, target, test, task=task, preset=None, quantiles=None, limits=self.limits
@@ -606,8 +622,9 @@ class Client(_Base):
                 setting (False).
             calendar: True adds hour, weekday, month and weekend as known covariates (no future= needed for them);
                 {"holidays": "US"} also adds a holiday flag.
-            data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
-                with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
+            data: The history: a long table with an id column, a time column and the target (pandas, polars, Spark,
+                Dask or Ray), a Series with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays.
+                Arrays need freq=.
             freq: The series' frequency as a pandas alias (h, D, W-SUN, MS, 15min, ...). Inferred from the timestamps
                 when left out; required for arrays and integer time steps.
             future: The known covariates over the next h steps: id, time and the known columns.
@@ -692,14 +709,16 @@ class Client(_Base):
             futures: {scenario name: future table of the known covariates}, one table per scenario.
             known: The covariate columns the scenarios set.
             kw: Any other forecast() option (id_col, time_col, freq, past, static, mask_columns, ...).
-            data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
-                with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
+            data: The history: a long table with an id column, a time column and the target (pandas, polars, Spark,
+                Dask or Ray), a Series with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays.
+                Arrays need freq=.
             h: How many steps to forecast, at the series' own frequency.
             level: Central intervals by width in percent, e.g. [80, 95]; the alternative to quantiles=.
             model: The model name, as GET /v1/models lists it.
             quantiles: Quantile levels in (0, 1), e.g. [0.1, 0.5, 0.9], or "all" for every level the model produces.
                 Default [0.1, 0.5, 0.9].
         """
+        data = _pandas(data)  # once, not per scenario
         if not futures:
             raise DataError("futures must map scenario names to future DataFrames.")
         frames = []
@@ -708,6 +727,79 @@ class Client(_Base):
             f.insert(0, "scenario", name)
             frames.append(f)
         return pd.concat(frames, ignore_index=True)
+
+    def explain_forecast(
+        self,
+        data: Any,
+        h: int,
+        *,
+        known: Cols = None,
+        past: Cols = None,
+        future: Optional[pd.DataFrame] = None,
+        model: str = DEFAULT_TS_MODEL,
+        freq: Optional[str] = None,
+        id_col: Optional[str] = None,
+        time_col: Optional[str] = None,
+        target_col: Target = None,
+        static: Cols = None,
+        season: Optional[int] = None,
+        calendar: Calendar = None,
+        mask_columns: Optional[bool] = None,
+    ) -> pd.DataFrame:
+        """How much each covariate moves the forecast: forecasts once with every covariate, then once per covariate with it
+        set to a neutral value (numbers: the series' mean over the history and the future; categories and flags: their most
+        common value). Costs one forecast plus one more per covariate in known and past.
+
+        Args:
+            known: The known covariates to explain (their future values in future=, or in the same table).
+            past: The past covariates to explain.
+            data: The history: a long table with an id column, a time column, the target and the covariates.
+            h: How many steps to forecast, at the series' own frequency.
+            future: The known covariates over the next h steps: id, time and the known columns.
+            calendar: True adds hour, weekday, month and weekend as known covariates (used in every forecast, not
+                explained).
+            static: Columns that are constant per series (used in every forecast, not explained).
+            freq: The series' frequency as a pandas alias (h, D, W-SUN, MS, 15min, ...). Inferred from the timestamps
+                when left out; required for arrays and integer time steps.
+            id_col: The column naming each series. Default: unique_id, id, item_id or series_id if present, else one
+                series.
+            mask_columns: Send target and covariate names as c0, c1, ...; results keep your names. Default: the
+                client's setting (False).
+            model: The model name, as GET /v1/models lists it.
+            season: The seasonal period in steps (24 for daily cycles of hourly data), to fix it instead of inferring it
+                from freq.
+            target_col: The column (or list of columns) to forecast. Default: y, target or value if present, else the
+                one numeric column.
+            time_col: The timestamp column. Default: ds, timestamp, time, date or datetime if present.
+
+        Returns:
+            One row per covariate and forecast step: id, time, (target), covariate, median (with every covariate),
+            median_without (with this one neutral) and effect (median - median_without). .attrs["summary"] has the
+            average absolute effect per covariate, largest first.
+        """
+        data, future = _pandas(data), _pandas(future)
+        names = _explain.covariates(data, known, past)
+
+        def run(d: Any, f: Any) -> ForecastResult:
+            return self.forecast(
+                d,
+                h,
+                known=known,
+                past=past,
+                future=f,
+                model=model,
+                freq=freq,
+                id_col=id_col,
+                time_col=time_col,
+                target_col=target_col,
+                static=static,
+                season=season,
+                calendar=calendar,
+                mask_columns=mask_columns,
+            )
+
+        base = run(data, future)
+        return _explain.effects(base, {c: run(*_explain.neutralise(data, future, c, id_col)) for c in names})
 
     def evaluate(
         self,
@@ -750,8 +842,9 @@ class Client(_Base):
                 quantile columns, or a forecast column}.
             calendar: True adds hour, weekday, month and weekend as known covariates (no future= needed for them);
                 {"holidays": "US"} also adds a holiday flag.
-            data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
-                with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
+            data: The history: a long table with an id column, a time column and the target (pandas, polars, Spark,
+                Dask or Ray), a Series with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays.
+                Arrays need freq=.
             freq: The series' frequency as a pandas alias (h, D, W-SUN, MS, 15min, ...). Inferred from the timestamps
                 when left out; required for arrays and integer time steps.
             h: How many steps to forecast, at the series' own frequency.
@@ -830,8 +923,9 @@ class Client(_Base):
                 spread).
             calendar: True adds hour, weekday, month and weekend as known covariates (no future= needed for them);
                 {"holidays": "US"} also adds a holiday flag.
-            data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
-                with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
+            data: The history: a long table with an id column, a time column and the target (pandas, polars, Spark,
+                Dask or Ray), a Series with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays.
+                Arrays need freq=.
             freq: The series' frequency as a pandas alias (h, D, W-SUN, MS, 15min, ...). Inferred from the timestamps
                 when left out; required for arrays and integer time steps.
             id_col: The column naming each series. Default: unique_id, id, item_id or series_id if present, else one
@@ -896,8 +990,9 @@ class Client(_Base):
             mask_columns: Send target and covariate names as c0, c1, ...; results keep your names. Default: the
                 client's setting (False).
             max_gap: Longest run of missing points to fill. Default: the API's maximum horizon.
-            data: The history: a long table with an id column, a time column and the target (pandas or polars), a Series
-                with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.
+            data: The history: a long table with an id column, a time column and the target (pandas, polars, Spark,
+                Dask or Ray), a Series with a DatetimeIndex, a numpy array (one series per row), or a dict of arrays.
+                Arrays need freq=.
             freq: The series' frequency as a pandas alias (h, D, W-SUN, MS, 15min, ...). Inferred from the timestamps
                 when left out; required for arrays and integer time steps.
             id_col: The column naming each series. Default: unique_id, id, item_id or series_id if present, else one
@@ -937,6 +1032,63 @@ class Client(_Base):
         )
         warn_all([w for w in prep.warnings if not w.startswith("Filled ")] + warns)  # filling them is the point here
         return out
+
+    def anomaly_stream(
+        self,
+        *,
+        window: int = 512,
+        threshold: float = 3.0,
+        model: str = DEFAULT_TS_MODEL,
+        freq: Optional[str] = None,
+        id_col: Optional[str] = None,
+        time_col: Optional[str] = None,
+        target_col: Target = None,
+        known: Cols = None,
+        past: Cols = None,
+        static: Cols = None,
+        season: Optional[int] = None,
+        calendar: Calendar = None,
+        mask_columns: Optional[bool] = None,
+    ) -> _anomaly.AnomalyStream:
+        """Anomaly detection on points as they arrive: stream.update(new_points) scores only the new points, against forecasts
+        from the recent history before them, and keeps the last `window` points of every series for the next update. Each
+        update is one detect_anomalies call (on the kept history plus the new points), whatever the number of series.
+
+        Args:
+            window: Points kept per series as history for the next update.
+            threshold: Score above which a point is flagged (its distance from the forecast, in units of the forecast's
+                spread).
+            calendar: True adds hour, weekday, month and weekend as known covariates; {"holidays": "US"} also adds a
+                holiday flag.
+            known: Covariate columns whose future values you know, sent with each update's points.
+            past: Covariate columns known only up to now, sent with each update's points.
+            static: Columns that are constant per series (region, store size).
+            freq: The series' frequency as a pandas alias (h, D, W-SUN, MS, 15min, ...). Inferred from the timestamps
+                when left out; required for arrays and integer time steps.
+            id_col: The column naming each series. Default: unique_id, id, item_id or series_id if present, else one
+                series.
+            mask_columns: Send target and covariate names as c0, c1, ...; results keep your names. Default: the
+                client's setting (False).
+            model: The model name, as GET /v1/models lists it.
+            season: The seasonal period in steps (24 for daily cycles of hourly data), to fix it instead of inferring it
+                from freq.
+            target_col: The column (or list of columns) to forecast. Default: y, target or value if present, else the
+                one numeric column.
+            time_col: The timestamp column. Default: ds, timestamp, time, date or datetime if present.
+        """
+        opts = dict(
+            threshold=threshold,
+            model=model,
+            freq=freq,
+            target_col=target_col,
+            known=known,
+            past=past,
+            static=static,
+            season=season,
+            calendar=calendar,
+            mask_columns=mask_columns,
+        )
+        return _anomaly.AnomalyStream(self, window, id_col, time_col, opts)
 
     # ---- tabular ----
 
@@ -1002,6 +1154,7 @@ class Client(_Base):
             background: Return a Job at once instead of waiting: job.wait() gives the result. A table too large for a
                 direct call runs as a job anyway, and is waited for unless background=True.
         """
+        train, test = self._table(train), self._table(test)
         picked = _compare.check_models(compare) if compare else None
         tr, te, pt, q, warns, extra = _tabular.prepare(
             train,
@@ -1108,6 +1261,7 @@ class Client(_Base):
             preset: "fast" (default: one holdout split, the quickest), "medium" (3-fold bagging, about 3x the time) or "pro" (8-fold bagging, the most accurate; "full" is the same).
             task: "regress" adds what regression's per-row intervals cost.
         """
+        train, test = self._table(train), self._table(test)
         _tabular.check_options(preset, None)
         counts = _estimate_counts(train, target, test, train_rows, features, predict_rows)
         fit = self._t.request("POST", "/v1/estimate", _estimate_body("fit", counts, preset, task))
@@ -1212,7 +1366,7 @@ class Client(_Base):
             task: "classify", "regress", or None to let the server infer it. Pass it for integer targets (a 1-5 rating
                 could be either).
         """
-        df = _tabular._frame(_pandas(data), "data")
+        df = _tabular._frame(data, "data", self.limits)
         if target not in df.columns:
             raise DataError(f"target {target!r} is not a column. Columns: {list(df.columns)}")
         df = df[df[target].notna()]
@@ -1303,6 +1457,7 @@ class Client(_Base):
             time_limit: Seconds for the whole call.
             train: The training table: one row per example, the target column included.
         """
+        train = self._table(train)
         if not isinstance(target, str):
             targets = _targets(target, train)
             opts = dict(
@@ -1413,6 +1568,7 @@ class Client(_Base):
             model: The model name, as GET /v1/models lists it.
             preset: "fast" (default: one holdout split, the quickest), "medium" (3-fold bagging, about 3x the time) or "pro" (8-fold bagging, the most accurate; "full" is the same).
         """
+        df = self._table(df)
         out = df.copy()
         filled = pd.DataFrame(False, index=df.index, columns=df.columns)
         cols = [c for c in (columns or df.columns) if df[c].isna().any()]
@@ -1585,6 +1741,50 @@ class AsyncClient(_Base):
         warn_all(res.warnings)
         return res
 
+    async def explain_forecast(
+        self,
+        data: Any,
+        h: int,
+        *,
+        known: Cols = None,
+        past: Cols = None,
+        future: Optional[pd.DataFrame] = None,
+        model: str = DEFAULT_TS_MODEL,
+        freq: Optional[str] = None,
+        id_col: Optional[str] = None,
+        time_col: Optional[str] = None,
+        target_col: Target = None,
+        static: Cols = None,
+        season: Optional[int] = None,
+        calendar: Calendar = None,
+        mask_columns: Optional[bool] = None,
+    ) -> pd.DataFrame:
+        data, future = _pandas(data), _pandas(future)
+        names = _explain.covariates(data, known, past)
+
+        def run(d: Any, f: Any) -> Any:
+            return self.forecast(
+                d,
+                h,
+                known=known,
+                past=past,
+                future=f,
+                model=model,
+                freq=freq,
+                id_col=id_col,
+                time_col=time_col,
+                target_col=target_col,
+                static=static,
+                season=season,
+                calendar=calendar,
+                mask_columns=mask_columns,
+            )
+
+        base, *rest = await asyncio.gather(
+            run(data, future), *(run(*_explain.neutralise(data, future, c, id_col)) for c in names)
+        )
+        return _explain.effects(base, dict(zip(names, rest)))
+
     async def evaluate(
         self,
         data: Any,
@@ -1672,6 +1872,7 @@ class AsyncClient(_Base):
         mask_columns: Optional[bool] = None,
         _mask: Optional[Mask] = None,
     ) -> Union[PredictionResult, AsyncJob]:
+        train, test = self._table(train), self._table(test)
         picked = _compare.check_models(compare) if compare else None
         tr, te, pt, q, warns, extra = _tabular.prepare(
             train,
@@ -1807,7 +2008,7 @@ class AsyncClient(_Base):
         mask_columns: Optional[bool] = None,
     ) -> TableEvaluation:
         """Client.evaluate_table, with the folds run concurrently."""
-        df = _tabular._frame(_pandas(data), "data")
+        df = _tabular._frame(data, "data", self.limits)
         if target not in df.columns:
             raise DataError(f"target {target!r} is not a column. Columns: {list(df.columns)}")
         df = df[df[target].notna()]
@@ -1873,6 +2074,7 @@ class AsyncClient(_Base):
         store: Optional[bool] = None,
         background: bool = False,
     ) -> Union[AsyncFittedModel, AsyncFitGroup, AsyncJob]:
+        train = self._table(train)
         if not isinstance(target, str):
             targets = _targets(target, train)
             opts = dict(

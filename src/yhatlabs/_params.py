@@ -3,7 +3,7 @@
 """
 
 SHARED = {
-    "data": "The history: a long table with an id column, a time column and the target (pandas or polars), a Series with a "
+    "data": "The history: a long table with an id column, a time column and the target (pandas, polars, Spark, Dask or Ray), a Series with a "
     "DatetimeIndex, a numpy array (one series per row), or a dict of arrays. Arrays need freq=.",
     "h": "How many steps to forecast, at the series' own frequency.",
     "model": "The model name, as GET /v1/models lists it.",

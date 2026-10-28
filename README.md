@@ -94,6 +94,8 @@ timestamps and splits large inputs into requests for you.
 | Compare with the forecast you use today | `yh.evaluate(df, h, compare={"current": mine})` |
 | Ask "what if" (a heatwave, a price change) | `yh.scenarios(df, h, {"base": f0, "heatwave": f1}, known=[...])` |
 | Flag unusual points | `yh.detect_anomalies(df)` |
+| Flag unusual points as they arrive | `stream = yh.anomaly_stream()`, then `stream.update(new_points)` |
+| See how much each input moves the forecast | `yh.explain_forecast(df, h, known=[...], future=...)` |
 | Fill gaps inside series | `yh.fill_gaps(df)` |
 | Forecasts that add up (stores, regions, total) | `yhatlabs.hierarchy.aggregate(...)`, then `hierarchy.reconcile(fc, tree)` |
 
@@ -231,6 +233,7 @@ model.importance(holdout)
 | Measure accuracy and calibration on your table | `yh.evaluate_table(df, target, cv=5)` |
 | See how one column moves the prediction | `model.effect("temperature")` |
 | See which columns matter | `model.importance(holdout)` |
+| Find rows unlike the training rows | `yhatlabs.outliers(train, test)` |
 | Reuse a fit later, anywhere | `model.save("model.json")`, then `yhatlabs.load("model.json")` |
 | Predict once, without saving a fit | `yh.predict(train, target, test)` |
 | Fill missing cells | `yh.impute(df)` |
@@ -361,7 +364,9 @@ The defaults suit most work. These settings are there for long jobs, self-hosted
 - **Your key:** `yh.whoami()` checks it and shows the models it can use and its quota.
 - **Provenance:** every result carries `.provenance`: model, settings, request ids, SDK version and a fingerprint of the
   input, enough to rerun or cite it. `.timing` gives the client-side total and, for tables, the server's fit/predict split.
-- **Polars:** input works wherever pandas does, and results have `.to_polars()`.
+- **Polars, Spark, Dask and Ray:** input works wherever pandas does (polars LazyFrames too), and results have
+  `.to_polars()`. A distributed table larger than the API takes raises `DataError` before it is collected: sample or
+  aggregate it first.
 
 </details>
 

@@ -10,7 +10,7 @@ from typing import Any, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 
-from ._forecast import ID_NAMES, TARGET_NAMES, TIME_NAMES, Limits, _infer_freq, _pick, to_offset
+from ._forecast import ID_NAMES, TARGET_NAMES, TIME_NAMES, Limits, _infer_freq, _pandas, _pick, to_offset
 
 SEVERITIES = ("error", "warning", "note")
 
@@ -76,14 +76,15 @@ def _issue(rows: list, severity: str, code: str, where: Any, detail: str, sugges
 
 
 def _frame(data: Any) -> pd.DataFrame:
-    if hasattr(data, "to_pandas") and not isinstance(data, pd.DataFrame):  # polars
-        data = data.to_pandas()
+    data = _pandas(data)  # polars, Spark, Dask, Ray
     if isinstance(data, pd.Series):
         data = data.to_frame(name=data.name or "y")
         if isinstance(data.index, pd.DatetimeIndex):
             data = data.rename_axis("ds").reset_index()
     if not isinstance(data, pd.DataFrame):
-        raise TypeError("check() takes a pandas or polars DataFrame (or a Series with a DatetimeIndex).")
+        raise TypeError(
+            "check() takes a pandas, polars, Spark, Dask or Ray DataFrame (or a Series with a DatetimeIndex)."
+        )
     return data.rename(columns=str)
 
 

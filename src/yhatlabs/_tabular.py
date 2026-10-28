@@ -104,10 +104,10 @@ def encode_table(df: pd.DataFrame) -> Tuple[Any, float]:
     return to_records(df), size
 
 
-def _frame(x: Any, what: str) -> pd.DataFrame:
+def _frame(x: Any, what: str, limits: Optional[Limits] = None) -> pd.DataFrame:
     from ._forecast import _pandas
 
-    x = _pandas(x)
+    x = _pandas(x, limits)
     if isinstance(x, pd.DataFrame):
         return x
     if isinstance(x, (list, tuple)) and x and isinstance(x[0], dict):
@@ -178,7 +178,7 @@ def prepare_train(
 ) -> Tuple[pd.DataFrame, Optional[str], List[str]]:
     """Validate the training table; returns (train with an observed target, problem_type, warnings)."""
     warns: List[str] = []
-    train = _str_columns(_frame(train, "train"), "train")
+    train = _str_columns(_frame(train, "train", limits), "train")
     if target not in train.columns:
         raise DataError(f"target {target!r} is not a column of train. Columns: {list(train.columns)}")
     missing = train[target].isna()
@@ -197,7 +197,7 @@ def prepare_train(
 def prepare_test(test: Any, features: List[str], target: str, limits: Limits) -> Tuple[pd.DataFrame, List[str]]:
     """Validate the rows to score against the training columns; keeps the caller's index."""
     warns: List[str] = []
-    test = _str_columns(_frame(test, "test"), "test")
+    test = _str_columns(_frame(test, "test", limits), "test")
     if target in test.columns:
         if test[target].notna().any():
             warns.append(f"test has the target column {target!r}; it was dropped before sending.")

@@ -119,11 +119,66 @@ class Prepared:
     warnings: List[str]
 
 
-def _pandas(x: Any) -> Any:
-    """Polars (or anything else with .to_pandas()) in, pandas out; everything else unchanged."""
-    if x is not None and not isinstance(x, (pd.DataFrame, pd.Series)) and hasattr(x, "to_pandas"):
-        return x.to_pandas()
-    return x
+LAZY_NAMES = {"spark": "Spark DataFrame", "dask": "Dask DataFrame", "ray": "Ray Dataset", "polars": "polars LazyFrame"}
+
+
+def _lazy(x: Any) -> Optional[str]:
+    """Which lazy or distributed frame `x` is (spark, dask, ray, polars LazyFrame), by its type's module; None otherwise.
+    Nothing is imported: only objects of those libraries match.
+    """
+    root = type(x).__module__.split(".")[0]
+    if root == "pyspark" and hasattr(x, "toPandas"):
+        return "spark"
+    if root in ("dask", "dask_expr") and hasattr(x, "compute"):
+        return "dask"
+    if root == "ray" and hasattr(x, "to_pandas"):
+        return "ray"
+    if root == "polars" and type(x).__name__ == "LazyFrame":
+        return "polars"
+    return None
+
+
+def _columns(x: Any, kind: str) -> int:
+    if kind == "ray":
+        return len(x.schema().names)
+    if kind == "polars":
+        return len(x.collect_schema() if hasattr(x, "collect_schema") else x.schema)
+    return len(x.columns)
+
+
+def _collect(x: Any, kind: str, n: Optional[int]) -> pd.DataFrame:
+    """The frame in pandas: all of it, or its first n rows (so a frame past the limit is never pulled in whole)."""
+    if kind == "spark":
+        return (x if n is None else x.limit(n)).toPandas()
+    if kind == "dask":
+        return x.compute() if n is None else x.head(n, npartitions=-1)
+    if kind == "ray":
+        return (x if n is None else x.limit(n)).to_pandas()
+    return (x if n is None else x.head(n)).collect().to_pandas()
+
+
+def _pandas(x: Any, limits: Optional[Limits] = None) -> Any:
+    """Polars, Spark, Dask and Ray frames (or anything else with .to_pandas()) in, pandas out; everything else unchanged.
+    With limits (a table for the API), a lazy or distributed frame larger than the API takes raises DataError before it is
+    collected in full.
+    """
+    if x is None or isinstance(x, (pd.DataFrame, pd.Series)):
+        return x
+    kind = _lazy(x)
+    if kind is None:
+        return x.to_pandas() if hasattr(x, "to_pandas") else x
+    if limits is None:
+        return _collect(x, kind, None)
+    cap = limits.max_tabular_rows
+    if limits.max_cells_async:
+        cap = min(cap, limits.max_cells_async // max(1, _columns(x, kind)))
+    df = _collect(x, kind, cap + 1)
+    if len(df) > cap:
+        raise DataError(
+            f"The {LAZY_NAMES[kind]} has more than {cap} rows, more than the API takes in one call. Sample or aggregate it "
+            "first (e.g. .sample() or a group-by), then pass the result."
+        )
+    return df
 
 
 def _clean(v: Any) -> Optional[Union[float, str]]:
