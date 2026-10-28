@@ -97,6 +97,8 @@ timestamps and splits large inputs into requests for you.
 | Fill gaps inside series | `yh.fill_gaps(df)` |
 | Forecasts that add up (stores, regions, total) | `yhatlabs.hierarchy.aggregate(...)`, then `hierarchy.reconcile(fc, tree)` |
 
+What a forecast used is in `fc.usage`: credits for keys of an organization, series for keys without one.
+
 ### Inputs and uncertainty
 
 Forecasts get better when you tell the model what you already know about the future, and more useful when the uncertainty
@@ -120,9 +122,13 @@ fc = yh.forecast(
 fc.plot(history=df)
 ```
 
+One table works too: rows after a series' last value, with the target blank and the `known=` columns filled in, are taken
+as its future, so `yh.forecast(df, h=24, known=["temperature"])` needs no `future=`.
+
 - **Uncertainty:** the default is the median plus the 0.1 and 0.9 quantiles.
   - `quantiles=` takes any levels strictly between 0 and 1, and `level=[80, 95, 99]` gives central intervals by width.
-  - Intervals are calibrated on each series' own past windows, so an 80% interval holds about 80% of the time there.
+  - Intervals are calibrated on each series' own past windows: an 80% interval aims to hold 80% of the actual values.
+    Check it on your data with `yh.evaluate` (its calibration table).
   - `quantiles="all"` returns every level the model produces; levels between those are interpolated and listed in
     `fc.derived`.
   - `mean=True` adds the mean, for forecasts you will add up; `samples=N` returns sample paths; `history=True` returns
@@ -199,8 +205,9 @@ print(res.df.head(3))
 439           1  0.000  1.000
 ```
 
-The fit happens once, on our side; every `predict` after it sends only the new rows. For a number instead of a class,
-ask for an interval as well:
+The fit happens once, on our side; every `predict` after it sends only the new rows. Each prediction from a saved model
+is charged on the training table's size (0.5 x its cells) plus the predicted cells. For a number instead of a class, ask
+for an interval as well:
 
 ```python
 model = yh.fit(train, target="progression", task="regress")
@@ -229,6 +236,7 @@ model.importance(holdout)
 | Fill missing cells | `yh.impute(df)` |
 | Use it in scikit-learn | `ChakraTabClassifier()`, `ChakraTabRegressor()` |
 | Compare with standard models on the same rows | `yh.predict(train, target, test, compare=True)`, then `res.comparison.score(actual, ChakraTab=res)` |
+| Standard models alone, on the same split | `yh.compare(train, target, test)` |
 | Run a large table in the background | `job = yh.fit(train, target, background=True)`, then `job.wait()` |
 | Know the cost before you run | `yh.estimate_table(train, target=..., test=...)` |
 
@@ -238,16 +246,20 @@ A fit stays available so you can score new rows as they arrive, explain the mode
 sending the training data again.
 
 - **Lifetime:** a fit is kept 30 days after its last use (each prediction renews it; `ttl_days=` sets 1 to 365), or
-  until `model.delete()`. A `with yh.fit(...) as model:` block deletes it on exit. `model.save(path)` writes a small record, with no training data, that `yhatlabs.load()`
-  reattaches anywhere.
+  until `model.delete()`. A `with yh.fit(...) as model:` block deletes it on exit. `model.save(path)` writes a record that `yhatlabs.load()` reattaches anywhere.
+  The file includes a sample of up to 2,000 training rows for the out-of-range and novelty checks; pass `sample=False`
+  to leave it out (`profile=False` on `fit` skips the profile entirely).
 - **Classes and numbers:** classification returns `predictions` and `probabilities`, and with `set_coverage=` a set of
   classes per row that holds the true one that often. Regression returns `predictions` and, with `quantiles=`, an interval
   from a calibrated distribution for every row: wider where the row is harder to call or lies outside the training data.
   Pass `task="classify"` or `task="regress"` for integer targets, which could be either.
 - **Rows that belong together:** with `groups="machine"` (or `time_col=` for rows over time), validation holds out whole
   groups or later periods, so scores and intervals hold for groups the model has not seen.
-- **Presets:** `fast` is the default; `medium` is more accurate and about 3x slower; `pro` is the most accurate.
-  `eval_metric=`, `time_limit=` and `seed=` are also accepted.
+- **Presets:** `fast` is the default (seconds on a few thousand rows); `medium` is more accurate and about 2-3x slower;
+  `pro` is the most accurate, about 4-8x slower than `fast` on the same table. `eval_metric=`, `time_limit=` and `seed=`
+  are also accepted.
+- **Regression columns:** `prediction` is the point forecast to use; with `quantiles=`, `median` and `mean` describe each
+  row's predictive distribution. Ranges add a fixed cost per call, and about 10-20 s the first time on a saved model.
 - **Large tables:** a table larger than a direct call takes runs as a background job, and the call waits for it, so the
   result is the same. `background=True` returns the job at once instead (`job.status()`, `job.wait()`, `job.cancel()`).
 - **Importance:** how much the score drops when a column is shuffled. Labeled rows the model has not seen give the most honest
@@ -304,7 +316,11 @@ yhatlabs predict train.csv --target churn --test new.csv -o scored.csv
 yhatlabs whoami
 ```
 
-- **Machine-readable output:** `--json` on any command. `check` exits with code 2 on errors, so it can gate a pipeline.
+- **Machine-readable output:** `--json` on any command, before or after it. `check` exits with code 2 on errors, so it
+  can gate a pipeline.
+- **Account:** `yhatlabs models`, `usage`, `limits` and `fits` print the models your key can call, what it has used, the
+  API's limits and your saved models. `predict` takes `--preset pro`, `--compare` and `--no-store`; `forecast` takes
+  `--no-store`.
 - **Coding agents:** `yhatlabs skills install` writes a skill into the current project for Claude Code, Cursor, Codex and
   similar agents, so they know the calls and the rules.
 - **Short alias:** `yhat` works too.
@@ -370,7 +386,7 @@ Errors tell you whose side the problem is on and what to do next. Temporary prob
 
 Your inputs are sent to the YHat Labs API to be processed.
 - **One-shot calls:** kept as described in our [privacy policy](https://yhatlabs.com/privacy).
-- **Fits:** a fitted model keeps its training table only until it expires or you delete it.
+- **Fits:** a saved model is kept until it expires or you delete it.
 - **Large tables:** with the `[parquet]` extra, tables over 8 MB are uploaded once and reused by reference.
 - **Column names:** `mask_columns=True` keeps them on your machine; values are sent as they are.
 - **Logs:** `store=False` on a call keeps it out of your Logs.

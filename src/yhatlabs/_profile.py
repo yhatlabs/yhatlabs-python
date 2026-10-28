@@ -145,6 +145,6 @@ class Checks:
         return self._oor
 
     def novelty(self) -> Optional[pd.Series]:
-        if self.prof is not None and self._nov is None:
+        if self.prof is not None and self.prof.get("sample") is not None and self._nov is None:
             self._nov = novelty(self.prof, self.test)
         return self._nov

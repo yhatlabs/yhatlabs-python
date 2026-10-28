@@ -62,6 +62,7 @@ yhatlabs.load("model.json")
 yh.predict(train, "target", test)  # one-shot, no fit saved
 res = yh.predict(train, "target", test, compare=True)  # also XGBoost, random forest, linear, a baseline
 res.comparison.score(actual, ChakraTab=res)  # every model scored the same way on the test rows
+yh.compare(train, "target", test)  # the standard models alone
 job = yh.fit(train, "target", preset="pro", background=True)  # returns at once; job.wait() gives the model
 ```
 
@@ -87,5 +88,11 @@ yhatlabs whoami
 - Report uncertainty with the numbers the result gives (coverage, intervals, novelty), not a single point.
 - Large tables are uploaded once automatically, and a table too large for a direct call runs as a background job that the
   call waits for; nothing else to do.
-- Presets: "fast" (default), "medium", "pro" (most accurate, slowest).
+- Presets: "fast" (default, seconds), "medium" (about 2-3x slower), "pro" (most accurate, about 4-8x slower than fast).
+- Regression: `prediction` is the point forecast; with quantiles=, `median` and `mean` describe the row's distribution.
+  Ranges add a fixed cost and about 10-20 s the first time on a saved model.
+- Predicting from a saved model is charged on the training table's size (0.5 x its cells) plus the predicted cells.
+- Forecast usage (`fc.usage`): credits for organization keys, series for keys without an organization.
+- Known drivers can sit in the same table: rows after the last value, target blank, known columns filled.
+- `m.save(path, sample=False)` leaves the training-row sample out of the file.
 - `store=False` on a call: it isn't shown in the user's Logs.

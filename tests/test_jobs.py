@@ -273,3 +273,80 @@ async def test_async_client_jobs_and_compare():
         job = await c.fit(_table(20), "y", background=True)
         model = await job.wait()
         assert model.id.startswith("fit_")
+
+
+# ---- fix round: saved records, seasonal naive, validation, deletes, job errors, one-table futures
+
+
+def test_save_keeps_distinct_classes_only_and_sample_is_optional(client, tmp_path):
+    df = _table(300)
+    m = client.fit(df, "y")
+    rec = m.save(tmp_path / "m.json")
+    assert sorted(rec["labels"]) == [0, 1] and rec["profile"]["sample"]
+    lean = m.save(tmp_path / "lean.json", sample=False)
+    assert "sample" not in lean["profile"] and lean["profile"]["columns"]
+    assert "labels" not in repr(m) and "classes=2" in repr(m)
+    reg = client.fit(df.assign(y=df.a * 2.5 + 0.1), "y", task="regress")
+    assert reg.save()["labels"] == []  # a numeric target needs no label list
+    from yhatlabs import load
+
+    back = load(tmp_path / "lean.json", client=client)
+    assert back.predict(df.drop(columns="y").head(2)).novelty is None  # no sample: no novelty, no error
+
+
+def test_delete_twice_and_expired_after_a_with_block(client):
+    df = _table(50)
+    with client.fit(df, "y") as m:
+        m.expires_at = 4_000_000_000  # the fake API's fits expire at once
+        assert not m.expired
+    assert m.expired
+    m.delete()  # a second delete does nothing
+
+
+def test_seasonal_naive_repeats_last_week_on_daily_data(client, api):
+    t = pd.date_range("2026-01-01", periods=140, freq="D")
+    y = 100 + 30 * np.sin(np.arange(140) * 2 * np.pi / 7)
+    ev = client.evaluate(pd.DataFrame({"ds": t, "y": y}), h=7, windows=2, baselines=("seasonal_naive", "naive"))
+    s = ev.scores.groupby("model")["mae"].mean()
+    assert s["seasonal_naive"] < s["naive"] / 5  # a weekly cycle: last week is a far better guess than the last value
+
+
+def test_bad_levels_presets_and_freq_raise_data_errors(client, hourly):
+    with pytest.raises(DataError, match="percentages"):
+        client.forecast(hourly, h=4, level=[0.8])
+    with pytest.raises(DataError, match="preset"):
+        client.estimate_table(train_rows=10, features=2, preset="turbo")
+    with pytest.raises(DataError, match="Common ones"):
+        client.forecast(hourly, h=4, freq="monthly")
+
+
+def test_a_horizon_longer_than_the_history_warns(client):
+    df = pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=12, freq="D"), "y": np.arange(12.0)})
+    with pytest.warns(UserWarning, match="longer than the history"):
+        client.forecast(df, h=20)
+
+
+def test_known_drivers_from_blank_rows_in_the_same_table(client, api):
+    t = pd.date_range("2026-01-01", periods=40, freq="D")
+    df = pd.DataFrame({"ds": t, "y": [*np.arange(33.0), *[None] * 7], "promo": [i % 2 for i in range(40)]})
+    with pytest.warns(UserWarning, match="rows after the last value"):
+        fc = client.forecast(df, h=7, known=["promo"])
+    sent = [b for m, p, b, _ in api.requests if p == "/v1/series/forecast"][-1]["series"][0]
+    assert len(sent["values"]) == 33 and len(sent["known_covariates"]["promo"]) == 40 and len(fc.df) == 7
+
+
+def test_job_failed_error_names_the_job():
+    api = JobsAPI(steps=("running",) * 5)
+    df = _table(20)
+    job = _client(api).predict(df, "y", df.drop(columns="y").head(2), background=True)
+    job.cancel()
+    with pytest.raises(JobFailedError) as e:
+        job.wait()
+    assert e.value.job_id == job.id and e.value.request_id != job.id
+
+
+def test_cli_takes_json_after_the_subcommand(capsys):
+    from yhatlabs._cli import main
+
+    assert main(["skills", "show", "--json"]) == 0
+    assert "yhatlabs" in capsys.readouterr().out

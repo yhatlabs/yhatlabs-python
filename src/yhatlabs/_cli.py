@@ -99,10 +99,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("predict", help="tabular: fit on train, predict test")
     p.add_argument("train"), p.add_argument("--target", required=True), p.add_argument("--test")
     (
-        p.add_argument("--task", choices=["classify", "regress"]),
-        p.add_argument("--preset", choices=["fast", "medium", "full"]),
+        p.add_argument("--task", choices=["classify", "regress", "classification", "regression"]),
+        p.add_argument("--preset", choices=["fast", "medium", "pro", "full"], metavar="{fast,medium,pro}"),
     )
     p.add_argument("--quantiles"), p.add_argument("--model"), p.add_argument("-o", "--output")
+    p.add_argument("--compare", action="store_true", help="also standard models (XGBoost, random forest, linear)")
     p.add_argument("--groups", help="column whose rows stay together in validation (machine, batch, patient)")
     p.add_argument("--time-col", dest="split_time", help="validate on contiguous periods of this column")
     p.add_argument("--set-coverage", type=float, help="classification: prediction sets with this coverage, e.g. 0.9")
@@ -111,7 +112,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     et.add_argument("--groups"), et.add_argument("--time-col", dest="split_time")
     (
         et.add_argument("--task", choices=["classify", "regress"]),
-        et.add_argument("--preset", choices=["fast", "medium", "full"]),
+        et.add_argument("--preset", choices=["fast", "medium", "pro", "full"], metavar="{fast,medium,pro}"),
     )
     et.add_argument("--model"), et.add_argument("-o", "--output", help="write every row's out-of-fold prediction here")
     for name in ("models", "usage", "limits", "fits", "whoami"):
@@ -129,6 +130,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     sk.add_argument(
         "--dir", default=".", help="project folder (default: current); writes .claude/skills and .agents/skills"
     )
+    for sp in (f, p):
+        sp.add_argument(
+            "--store", action=argparse.BooleanOptionalAction, default=None, help="--no-store: not shown in your Logs"
+        )
+    for sp in sub.choices.values():  # --json after the subcommand too
+        sp.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
     from ._client import Client
@@ -177,9 +184,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     groups=args.groups,
                     time_col=args.split_time,
                     set_coverage=args.set_coverage,
+                    compare=args.compare or None,
+                    store=args.store,
                     **({"model": args.model} if args.model else {}),
                 )
-                _write(res.df.reset_index(), args.output)
+                out = res.df
+                if res.comparison is not None:
+                    out = out.join(pd.DataFrame({f"prediction_{k}": v for k, v in res.comparison.predictions.items()}))
+                _write(out.reset_index(), args.output)
                 return 0
             if args.cmd == "evaluate-table":
                 ev = yh.evaluate_table(
@@ -230,6 +242,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     quantiles=_floats(args.quantiles),
                     level=_floats(args.level),
                     future=_read(args.future) if args.future else None,
+                    store=args.store,
                     **common,
                 )
                 _write(fc.df, args.output)

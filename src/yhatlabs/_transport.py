@@ -152,7 +152,7 @@ def _is_streamed(resp: httpx.Response) -> bool:
     return resp.status_code == 200 and _streamed_error(_json(resp)) is not None
 
 
-COLD_START_S = 300.0  # a model scaled to zero takes a few minutes to start; its 503s are waited out this long
+COLD_START_S = 300.0  # a cold start can take a few minutes; its 503s are waited out this long
 
 
 def _waking(resp: httpx.Response) -> bool:

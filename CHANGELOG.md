@@ -14,7 +14,19 @@
 - Credits are decimals (for example `usage["credits"] == 0.02`). `estimate_table()` asks the API (`POST /v1/estimate`)
   instead of working the price out locally, and returns `tokens` too.
 - Fits are kept 30 days after their last use by default; `fit(..., ttl_days=)` sets 1 to 365. The docs said 24 hours.
-- Forecasts split over several requests report their credits added up in `fc.usage`.
+- Forecasts split over several requests report their credits added up in `fc.usage` (for organization keys).
+- `model.save()` stores only the distinct classes, never one label per row; `save(path, sample=False)` (and
+  `FitGroup.save`) leaves out the sample of training rows. The model's repr shows the class count, not every class.
+- `FittedModel.usage` holds what the fit cost; `m.expired` is True after `delete()` or a `with` block, and a second
+  `delete()` does nothing.
+- `evaluate()`: the seasonal-naive baseline repeats the last week on daily data and the last year on weekly data (it
+  repeated the last value), falling back to the last value when the history is shorter than two seasons.
+- One table can carry the future of known drivers: rows after a series' last value, with the target blank, are used as
+  `future=`.
+- Clearer errors: `level=[0.8]` (levels are percentages), an unknown preset in `estimate_table()`, and a `freq=` pandas
+  doesn't know. A horizon longer than the history warns, and warnings point at your own line.
+- `JobFailedError.job_id` names the job; `comparison.score()` adds ROC AUC for two classes.
+- CLI: `--json` also after the subcommand, `--preset pro`, `predict --compare`, `--no-store` on `predict` and `forecast`.
 
 ## 0.2.0 (2026-10-15)
 

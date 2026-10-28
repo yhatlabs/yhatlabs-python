@@ -10,7 +10,7 @@ from typing import Any, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 
-from ._forecast import ID_NAMES, TARGET_NAMES, TIME_NAMES, Limits, _infer_freq, _pick
+from ._forecast import ID_NAMES, TARGET_NAMES, TIME_NAMES, Limits, _infer_freq, _pick, to_offset
 
 SEVERITIES = ("error", "warning", "note")
 
@@ -194,7 +194,7 @@ def _check_series(df: pd.DataFrame, h, target, id_col, time_col, freq, limits: L
     other = [c for c in cols if c not in (id_col, time_col, target)]
     for uid, g in df.dropna(subset=[time_col]).sort_values(time_col).groupby(id_col, sort=False):
         t = pd.DatetimeIndex(g[time_col].drop_duplicates())
-        off = pd.tseries.frequencies.to_offset(freq) if freq else _infer_freq(t)
+        off = to_offset(freq) if freq else _infer_freq(t)
         y = pd.to_numeric(g[target], errors="coerce")
         n, n_missing = len(g), int(y.isna().sum())
         gaps = 0

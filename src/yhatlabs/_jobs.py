@@ -36,7 +36,11 @@ def _delays() -> Iterator[float]:
 
 
 class JobFailedError(APIError):
-    """A background job ended without a result: it failed, or it was canceled (`type == "canceled"`)."""
+    """A background job ended without a result: it failed, or it was canceled (`type == "canceled"`). `job_id` names the job."""
+
+    def __init__(self, message: str, *, job_id: Optional[str] = None, **kw: Any):
+        super().__init__(message, **kw)
+        self.job_id = job_id
 
 
 def _failure(state: dict) -> JobFailedError:
@@ -44,7 +48,14 @@ def _failure(state: dict) -> JobFailedError:
     canceled = state.get("status") == "canceled"
     message = str(err.get("message") or ("The job was canceled." if canceled else "The job failed."))
     etype = err.get("type") or ("canceled" if canceled else "job_failed")
-    return JobFailedError(message, status=409 if canceled else 500, type=etype, request_id=state.get("id"), body=state)
+    return JobFailedError(
+        message,
+        job_id=state.get("id"),
+        status=409 if canceled else 500,
+        type=etype,
+        request_id=err.get("request_id"),
+        body=state,
+    )
 
 
 def _result(state: dict) -> Any:

@@ -190,11 +190,28 @@ def _pick(cols: Sequence[str], names: Sequence[str]) -> Optional[str]:
     return None
 
 
+FREQ_ALIASES = (
+    "D (daily), W (weekly), MS or M (monthly), QS (quarterly), YS (yearly), h (hourly), 15min, 30min, B (business days)"
+)
+
+
+def to_offset(freq: Any) -> pd.DateOffset:
+    """freq= as a pandas offset, or a DataError naming the aliases people use."""
+    try:
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore", FutureWarning)
+            return pd.tseries.frequencies.to_offset(freq)
+    except (ValueError, TypeError):
+        raise DataError(f"freq={freq!r} is not a pandas frequency. Common ones: {FREQ_ALIASES}.") from None
+
+
 def _infer_freq(times: pd.DatetimeIndex) -> Optional[pd.DateOffset]:
     if len(times) < 3:
         return None
     try:
-        f = pd.infer_freq(times)
+        with _warnings.catch_warnings():  # pandas warns about its own alias renames here; not the caller's concern
+            _warnings.simplefilter("ignore", FutureWarning)
+            f = pd.infer_freq(times)
     except (ValueError, TypeError):
         f = None
     if f:
@@ -384,12 +401,19 @@ def prepare(
         dup = df[df.duplicated([id_col, time_col], keep=False)][[id_col, time_col]].head(3).values.tolist()
         raise DataError(f"Duplicate (id, time) rows, e.g. {dup}. Each series needs one row per timestamp.")
     df = df.sort_values([id_col, time_col], kind="stable")
+    if known and future is None:
+        # one table: rows after a series' last value, with the target blank and the known columns filled, are its future
+        last = df[targets].notna().any(axis=1).groupby(df[id_col]).transform(lambda m: m[::-1].cummax()[::-1])
+        if (~last).any():
+            future, df = df.loc[~last, [id_col, time_col, *known]], df.loc[last]
+            warns.append(f"Used the {int((~last).sum())} rows after the last value as future= (their {known} values).")
 
     fut = None
     if known:
         if future is None:
             raise DataError(
-                f"known={known} needs future= : a DataFrame with {id_col!r}, {time_col!r} and those columns over the next {h} steps."
+                f"known={known} needs future= : a DataFrame with {id_col!r}, {time_col!r} and those columns over the next {h} steps"
+                " (or rows after the last value in the same table, with the target blank)."
             )
         fut = future.copy()
         fut.columns = [str(c) for c in fut.columns]
@@ -410,8 +434,9 @@ def prepare(
 
     offsets = {}
     groups = list(df.groupby(id_col, sort=False))
-    req_off = pd.tseries.frequencies.to_offset(freq) if freq else None
+    req_off = to_offset(freq) if freq else None
     filled_total = 0
+    short = []
     items: List[Item] = []
     for uid, g in groups:
         g = g.reset_index(drop=True)
@@ -444,6 +469,8 @@ def prepare(
                 f"Series {uid!r} has {T} points; only the most recent {limits.max_points_per_series} were sent."
             )
             T = len(g)
+        if T < h:
+            short.append(uid)
         tvals = {c: _numeric_list(g[c], f"series {uid!r} column {c!r}", warns) for c in targets}
         if not any(v is not None for vs in tvals.values() for v in vs):
             raise DataError(f"Series {uid!r} has no observed values.")
@@ -478,6 +505,11 @@ def prepare(
         items.append(item)
     if filled_total:
         warns.append(f"Filled {filled_total} missing timestamps with gaps (sent as missing values).")
+    if short:
+        warns.append(
+            f"The horizon ({h} steps) is longer than the history of {len(short)} series (e.g. {short[0]!r}); forecasts that"
+            " far ahead of so little data are rough."
+        )
     distinct = {_freq_str(o) for o in offsets.values()}
     if len(distinct) > 1:
         raise DataError(
@@ -660,6 +692,17 @@ def build_history(prep: Prepared, kept: List[Tuple[Item, dict]], levels: Sequenc
     return pd.concat(frames, ignore_index=True) if frames else None
 
 
+def _caller_level() -> int:
+    """The stacklevel of the first frame outside this package, so a warning points at the user's line."""
+    import sys
+
+    pkg = __name__.rsplit(".", 1)[0]
+    f, level = sys._getframe(1), 1
+    while f is not None and (f.f_globals.get("__name__") or "").split(".")[0] == pkg:
+        f, level = f.f_back, level + 1
+    return level
+
+
 def warn_all(msgs: List[str]) -> None:
     for m in msgs:
-        _warnings.warn(m, stacklevel=3)
+        _warnings.warn(m, stacklevel=_caller_level())

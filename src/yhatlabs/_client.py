@@ -170,6 +170,10 @@ def _levels(quantiles: Any, level: Optional[Sequence[float]]) -> Any:
         raise DataError("Pass quantiles= or level=, not both.")
     out = {0.5}
     for lv in level:
+        if 0 < float(lv) <= 1:
+            raise DataError(
+                f"levels are percentages, e.g. level=[80, 95]; for quantiles use quantiles=[0.1, 0.9] (got {lv})."
+            )
         if not 0 < float(lv) < 100:
             raise DataError(f"level values are interval widths in percent, between 0 and 100; got {lv}.")
         out |= {round(0.5 - float(lv) / 200, 6), round(0.5 + float(lv) / 200, 6)}
@@ -582,7 +586,7 @@ class Client(_Base):
         """Forecast the next `h` steps of every series in `data`.
 
         data: long DataFrame (id, timestamp, target[s], covariates), a Series with a DatetimeIndex, an array, or a dict of arrays
-        (arrays need freq=). quantiles: levels in [0.1, 0.9] (default 0.1, 0.5, 0.9) or "all"; or level=[80] for central intervals.
+        (arrays need freq=). quantiles: any levels in (0, 1) (default 0.1, 0.5, 0.9) or "all"; or level=[80] for central intervals.
         mean=True adds a `mean` column next to the median (the point forecast), computed from the native quantiles and listed in
         result.derived; use it when the quantity is summed later (totals over time or series), where the median is biased.
         known: columns whose future values you know (pass them in `future`, see yhatlabs.features.make_future); past: history-only
@@ -738,7 +742,9 @@ class Client(_Base):
             windows: How many backtest windows, ending at the end of each series.
             step: Steps between window cutoffs. Default: h (windows do not overlap).
             models: The models to score.
-            baselines: Simple forecasts to score against: seasonal_naive, naive, mean.
+            baselines: Simple forecasts to score against: seasonal_naive (repeats the last season: a week for daily data,
+                a day for hourly; the last value when the history is shorter than two seasons) and naive (repeats the last
+                value).
             metrics: Scores to compute per window: mase, sql, wql, mae, rmse, coverage@<level>.
             compare: Your own forecasts to score on the same windows: {name: table with the time (and id) column and
                 quantile columns, or a forecast column}.
@@ -962,10 +968,10 @@ class Client(_Base):
         Without test=, the rows of `train` whose target is missing are predicted.
         task: "classify", "regress" or None to let the server infer it. Pass it for integer targets: a rating from 1 to 5 or a
         small count may otherwise be inferred as classification.
-        preset: "fast" (the default: one holdout split), "medium" (3-fold bagging, about 3x slower and more accurate; what our
-        TabArena numbers use) or "pro" (8-fold bagging). eval_metric: what validation optimises, e.g. log_loss (default), roc_auc, f1; rmse
+        preset: "fast" (the default: one holdout split), "medium" (3-fold bagging, about 3x slower and more accurate) or "pro"
+        (8-fold bagging, the most accurate). eval_metric: what validation optimises, e.g. log_loss (default), roc_auc, f1; rmse
         (default), mae, r2 for regression. It does not change the decision rule. quantiles: regression prediction intervals,
-        e.g. [0.05, 0.5, 0.95] (split-conformal on out-of-sample errors). time_limit: seconds for the whole call. seed: the
+        e.g. [0.05, 0.5, 0.95], from each row's own predictive distribution. time_limit: seconds for the whole call. seed: the
         server uses 0 when omitted, so results are already reproducible.
 
         Args:
@@ -1102,6 +1108,7 @@ class Client(_Base):
             preset: "fast" (default: one holdout split, the quickest), "medium" (3-fold bagging, about 3x the time) or "pro" (8-fold bagging, the most accurate; "full" is the same).
             task: "regress" adds what regression's per-row intervals cost.
         """
+        _tabular.check_options(preset, None)
         counts = _estimate_counts(train, target, test, train_rows, features, predict_rows)
         fit = self._t.request("POST", "/v1/estimate", _estimate_body("fit", counts, preset, task))
         pred = (
@@ -1268,7 +1275,8 @@ class Client(_Base):
         each prediction sends only the rows to score. The fit is kept 30 days after its last use (each prediction renews it;
         ttl_days= sets 1 to 365) or until .delete(); `with yh.fit(...) as m:` deletes it on exit. Options as in predict().
         profile=True keeps a summary of the training table on the handle (ranges, categories, up to 2,000 sample rows), so
-        predictions report out_of_range and novelty; it stays on your machine (and in .save() records). False drops it.
+        predictions report out_of_range and novelty; it stays on your machine unless saved to a file (.save(), whose
+        sample=False leaves the rows out). False drops it.
         target=[...] fits each target on the features alone (the other targets left out) and returns a FitGroup that predicts,
         explains and deletes them together; task= may then be a dict per target. One fit's quota per target.
 

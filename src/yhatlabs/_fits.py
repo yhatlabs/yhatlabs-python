@@ -33,7 +33,7 @@ def _not_deployed(e: NotFoundError) -> UnsupportedError:
     )
 
 
-@dataclass
+@dataclass(repr=False)
 class FittedModel:
     id: str
     model: str
@@ -45,12 +45,16 @@ class FittedModel:
     expires_at: int
     intervals: bool  # regression fits: whether quantiles= is available
     features: Optional[List[str]] = None
-    labels: List[Any] = field(default_factory=list)
+    labels: List[Any] = field(default_factory=list, repr=False)  # the distinct training classes, to restore label types
     _client: Any = field(default=None, repr=False, compare=False)
     profile: Optional[Dict[str, Any]] = field(
         default=None, repr=False
     )  # the training table's ranges and a row sample (_profile)
     mask: Optional[Dict[str, str]] = field(default=None, repr=False)  # mask_columns=True: real column name -> wire name
+    usage: Dict[str, Any] = field(
+        default_factory=dict, repr=False
+    )  # what the fit cost (tokens, credits), from its reply
+    deleted: bool = field(default=False, repr=False)
 
     @classmethod
     def from_reply(cls, reply: dict, features: Optional[List[str]], labels: List[Any], client: Any) -> FittedModel:
@@ -58,7 +62,9 @@ class FittedModel:
         if classes is not None and labels:
             classes = _tabular._restore_labels(classes, labels)
         fit = reply.get("fit") or {}
-        return cls(
+        if fit.get("problem_type") == "regression":
+            labels = []  # numbers come back as numbers; the distinct values of a numeric target are not needed
+        fm = cls(
             reply["id"],
             reply.get("model", ""),
             reply.get("target", ""),
@@ -72,13 +78,22 @@ class FittedModel:
             labels or list(classes or []),
             client,
         )
+        fm.usage = dict(reply.get("usage") or {})
+        return fm
 
-    def save(self, path: Any = None) -> Dict[str, Any]:
+    def save(self, path: Any = None, *, sample: bool = True) -> Dict[str, Any]:
         """Writes the fit's record to `path` as JSON, and returns it. Load it later, in another process or on another machine,
-        with yhatlabs.load(path). The fit itself lives on our side; the record holds the training profile (column ranges,
-        categories and a sample of at most 2,000 training rows, for out_of_range and novelty) unless the fit was made with
-        profile=False.
+        with yhatlabs.load(path). The fit itself lives on our side. The record holds the training profile (column ranges and
+        categories for out_of_range) and a sample of up to 2,000 training rows (for novelty and effect()); sample=False leaves
+        the rows out, and a fit made with profile=False has no profile at all.
+
+        Args:
+            path: Where to write the JSON record; None only returns it.
+            sample: Include the sample of training rows.
         """
+        profile = (
+            self.profile if sample or not self.profile else {k: v for k, v in self.profile.items() if k != "sample"}
+        )
         rec = {
             "format": RECORD_FORMAT,
             "sdk": f"yhatlabs-python {__version__}",
@@ -94,17 +109,24 @@ class FittedModel:
             "created_at": self.created_at,
             "expires_at": self.expires_at,
             "intervals": self.intervals,
-            "profile": self.profile,
+            "profile": profile,
             "mask": self.mask,
         }
         if path is not None:
             Path(path).write_text(json.dumps(rec, indent=2, default=str))
         return rec
 
+    def __repr__(self) -> str:
+        cls = self.classes or []
+        shown = (
+            "" if not cls else f", classes={len(cls)} ({', '.join(map(str, cls[:3]))}{', ...' if len(cls) > 3 else ''})"
+        )
+        return f"{type(self).__name__}(id={self.id!r}, model={self.model!r}, target={self.target!r}, problem_type={self.problem_type!r}{shown})"
+
     @property
     def expired(self) -> bool:
-        """By the local clock; the API is the authority (a deleted fit is gone before it expires)."""
-        return bool(self.expires_at) and self.expires_at <= time.time()
+        """True once delete() ran on this handle, or by the local clock past its expiry (the API is the authority)."""
+        return self.deleted or (bool(self.expires_at) and self.expires_at <= time.time())
 
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
@@ -235,8 +257,16 @@ class FittedModel:
         return _effect_frame(self.predict(stacked), col, values, len(stacked) // len(values))
 
     def delete(self) -> None:
-        """Delete the fit on our side (its stored training request and the fitted model). Expired fits are deleted anyway."""
-        self._c()._t.request("DELETE", f"/v1/table/fits/{self.id}")
+        """Delete the fit on our side (its stored training request and the fitted model). Expired fits are deleted anyway; a
+        second delete() does nothing.
+        """
+        if self.deleted:
+            return
+        try:
+            self._c()._t.request("DELETE", f"/v1/table/fits/{self.id}")
+        except NotFoundError:
+            pass  # already gone
+        self.deleted = True
 
     def info(self) -> Dict[str, Any]:
         """The fit as the API holds it: model, target, summary, classes, expiry."""
@@ -292,7 +322,13 @@ class AsyncFittedModel(FittedModel):
         return _effect_frame(await self.predict(stacked), col, values, len(stacked) // len(values))
 
     async def delete(self) -> None:  # type: ignore[override]
-        await self._c()._t.request("DELETE", f"/v1/table/fits/{self.id}")
+        if self.deleted:
+            return
+        try:
+            await self._c()._t.request("DELETE", f"/v1/table/fits/{self.id}")
+        except NotFoundError:
+            pass
+        self.deleted = True
 
     async def info(self) -> Dict[str, Any]:  # type: ignore[override]
         return await self._c()._t.request("GET", f"/v1/table/fits/{self.id}")
@@ -446,9 +482,11 @@ class FitGroup:
         for m in self.fits.values():
             m.delete()
 
-    def save(self, path: Any = None) -> Dict[str, Any]:
-        """Every target's fit record in one file; yhatlabs.load(path) gives the FitGroup back."""
-        rec = {"format": GROUP_FORMAT, "fits": {t: m.save() for t, m in self.fits.items()}}
+    def save(self, path: Any = None, *, sample: bool = True) -> Dict[str, Any]:
+        """Every target's fit record in one file; yhatlabs.load(path) gives the FitGroup back. sample=False leaves out the
+        training row samples, as in FittedModel.save().
+        """
+        rec = {"format": GROUP_FORMAT, "fits": {t: m.save(sample=sample) for t, m in self.fits.items()}}
         if path is not None:
             Path(path).write_text(json.dumps(rec, indent=2, default=str))
         return rec

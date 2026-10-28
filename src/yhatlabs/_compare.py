@@ -43,7 +43,7 @@ class Comparison:
     def score(self, actual: Any, **others: Any) -> pd.DataFrame:
         """Scores every model against the true values of the test rows, one row per model, best first.
 
-        Classification: accuracy, balanced accuracy and, where probabilities exist, log loss. Regression: MAE, RMSE, R2.
+        Classification: accuracy, balanced accuracy and, where probabilities exist, log loss (and ROC AUC for two classes). Regression: MAE, RMSE, R2.
 
         Args:
             actual: The true target values of the test rows, in the same order.
@@ -77,7 +77,10 @@ class Comparison:
         recall = [float((ps[ys == c] == c).mean()) for c in np.unique(ys)]
         out = {"accuracy": float((ys == ps).mean()), "balanced_accuracy": float(np.mean(recall))}
         if proba is not None:
-            out["log_loss"] = classification_scores(y.reset_index(drop=True), proba.reset_index(drop=True))["log_loss"]
+            sc = classification_scores(y.reset_index(drop=True), proba.reset_index(drop=True))
+            out["log_loss"] = sc["log_loss"]
+            if proba.shape[1] == 2:
+                out["roc_auc"] = sc["auc"]
         return out
 
 
