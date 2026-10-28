@@ -1345,7 +1345,7 @@ class Client(_Base):
         mask_columns: Optional[bool] = None,
     ) -> Comparison:
         """Train standard models on `train` and predict `test` with each, to compare with ChakraTab on the same rows:
-        LightGBM, XGBoost, a random forest and a linear model, plus a naive baseline (the most common class, or the mean).
+        XGBoost, a random forest and a linear model (LightGBM on request), plus a naive baseline (the most common class, or the mean).
         result.score(actual, ChakraTab=prediction) scores them side by side. A direct call: tables up to the direct size.
 
         Args:
