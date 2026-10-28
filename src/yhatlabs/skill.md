@@ -60,7 +60,7 @@ yh.estimate_table(train, target="target", test=test, preset="medium")  # credits
 m.save("model.json")
 yhatlabs.load("model.json")
 yh.predict(train, "target", test)  # one-shot, no fit saved
-res = yh.predict(train, "target", test, compare=True)  # also LightGBM, XGBoost, random forest, linear, a baseline
+res = yh.predict(train, "target", test, compare=True)  # also XGBoost, random forest, linear, a baseline
 res.comparison.score(actual, ChakraTab=res)  # every model scored the same way on the test rows
 job = yh.fit(train, "target", preset="pro", background=True)  # returns at once; job.wait() gives the model
 ```

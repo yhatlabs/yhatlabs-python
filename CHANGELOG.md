@@ -6,8 +6,8 @@
   publishes per preset) is sent as a job and waited for, so the result is the same; `background=True` returns a `Job` at
   once instead (`job.status()`, `job.wait(timeout=)`, `job.cancel()`). A long call the API hands back as a job is waited
   for too. Refs #13.
-- `compare=True` on `predict` (or `yh.compare(train, target, test)`) trains standard models on the same rows: LightGBM,
-  XGBoost, a random forest and a linear model, plus a naive baseline. `res.comparison.score(actual, ChakraTab=res)`
+- `compare=True` on `predict` (or `yh.compare(train, target, test)`) trains standard models on the same rows: XGBoost,
+  a random forest and a linear model (LightGBM on request), plus a naive baseline. `res.comparison.score(actual, ChakraTab=res)`
   scores them all the same way.
 - `preset="pro"` is accepted (the same as `"full"`: 8-fold bagging, the most accurate).
 - `store=False` on `forecast`, `predict`, `fit` and `compare`: the call isn't shown in your Logs.

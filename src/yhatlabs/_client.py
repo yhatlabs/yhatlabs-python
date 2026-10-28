@@ -989,8 +989,8 @@ class Client(_Base):
                 target is empty are predicted.
             time_limit: Seconds for the whole call.
             train: The training table: one row per example, the target column included.
-            compare: Also train standard models on the same rows, for comparison: True for LightGBM, XGBoost, a random
-                forest and a linear model, or a list of them ("lightgbm", "xgboost", "random_forest", "linear"). Their
+            compare: Also train standard models on the same rows, for comparison: True for XGBoost, a random forest and a
+                linear model, or a list of them ("xgboost", "random_forest", "linear", "lightgbm"). Their
                 predictions, with a naive baseline, are in result.comparison; result.comparison.score(actual) scores them.
             store: False: the call isn't shown in your Logs (see the data-handling page in the docs).
             background: Return a Job at once instead of waiting: job.wait() gives the result. A table too large for a
@@ -1131,7 +1131,7 @@ class Client(_Base):
             train: The training table: one row per example, the target column included.
             target: The column to predict.
             test: The rows to predict, with the same feature columns as train.
-            models: Which standard models: a list of "lightgbm", "xgboost", "random_forest", "linear". Default: all four.
+            models: Which standard models: a list of "xgboost", "random_forest", "linear", "lightgbm". Default: the first three.
             model: The model name, as GET /v1/models lists it.
             task: "classify", "regress", or None to let the server infer it.
             store: False: the call isn't shown in your Logs (see the data-handling page in the docs).
