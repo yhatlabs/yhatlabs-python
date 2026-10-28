@@ -91,7 +91,7 @@ def _estimate_body(call: str, counts: Tuple[int, int, int], preset: Optional[str
     body = {"call": call, "train_rows": rows, "features": features, "preset": preset or "fast"}
     if call == "predict":
         body["rows"] = test
-    if task == "regress":
+    if _tabular.norm_task(task) == "regress":
         body["regression"] = True
     return body
 

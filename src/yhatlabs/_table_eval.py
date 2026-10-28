@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from . import _tabular
 from ._errors import DataError
 
 DEFAULT_QUANTILES = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
@@ -23,6 +24,7 @@ def infer_task(y: pd.Series, task: Optional[str]) -> str:
     """The task the folds are run as, fixed up front so every fold agrees: numbers with fractions, or more than 20 distinct
     integers, are regression; anything else is classification. Pass task= to override.
     """
+    task = _tabular.norm_task(task)
     if task is not None:
         return task
     obs = y.dropna()

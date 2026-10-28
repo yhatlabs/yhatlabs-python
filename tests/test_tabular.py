@@ -165,3 +165,12 @@ def test_intervals_missing_from_old_api(client, api, monkeypatch):
     df = pd.DataFrame({"x": np.arange(20.0), "price": np.arange(20.0) * 1.5})
     with pytest.raises(UnsupportedError, match="prediction intervals"):
         client.predict(df.iloc[:15], "price", df.iloc[15:].drop(columns="price"), task="regress", quantiles=[0.1, 0.9])
+
+
+def test_task_accepts_the_api_names():
+    from yhatlabs import _tabular
+
+    y = pd.Series([1.5, 2.0, 3.25, 4.0])
+    assert _tabular.problem_type(y, "regression") == _tabular.problem_type(y, "regress")
+    assert _tabular.norm_task("classification") == "classify"
+    assert _tabular.norm_task("binary") == "classify"

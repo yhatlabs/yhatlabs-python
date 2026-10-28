@@ -24,6 +24,14 @@ EVAL_METRIC = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 EXACT_INT = 2**53  # larger ints lose precision as JSON numbers on the way through the gateway
 
 TASKS = ("classify", "regress")
+# the API's and other libraries' names for the same two tasks, so task="regression" works as well as task="regress"
+_TASK_ALIASES = {"regression": "regress", "classification": "classify", "binary": "classify", "multiclass": "classify"}
+
+
+def norm_task(task: Optional[str]) -> Optional[str]:
+    return _TASK_ALIASES.get(task, task) if isinstance(task, str) else task
+
+
 PRESETS = ("fast", "medium", "pro", "full")  # "pro" is the name the playground uses for "full"
 PARQUET_ABOVE_BYTES = 4 * 1024 * 1024  # JSON rows below this; parquet (when pyarrow is installed) above
 
@@ -118,6 +126,7 @@ def _str_columns(df: pd.DataFrame, what: str) -> pd.DataFrame:
 
 
 def problem_type(y: pd.Series, task: Optional[str]) -> Optional[str]:
+    task = norm_task(task)
     if task is not None and task not in TASKS:
         raise DataError(f"task must be one of {TASKS} or None (infer); got {task!r}.")
     if (
