@@ -369,7 +369,7 @@ Errors tell you whose side the problem is on and what to do next. Temporary prob
 <summary><b>Your data</b></summary>
 
 Your inputs are sent to the YHat Labs API to be processed.
-- **One-shot calls:** nothing is kept beyond our request archive.
+- **One-shot calls:** kept as described in our [privacy policy](https://yhatlabs.com/privacy).
 - **Fits:** a fitted model keeps its training table only until it expires or you delete it.
 - **Large tables:** with the `[parquet]` extra, tables over 8 MB are uploaded once and reused by reference.
 - **Column names:** `mask_columns=True` keeps them on your machine; values are sent as they are.

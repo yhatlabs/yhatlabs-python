@@ -25,6 +25,9 @@ def async_required(e: APIError) -> bool:
     return e.status == 413 and e.type == "async_required"
 
 
+WAIT_S = 2 * 3600.0  # a job runs at most an hour; past two, something is wrong
+
+
 def _delays() -> Iterator[float]:
     """Seconds between status checks: quick at first, then every 15 s."""
     yield from (2, 3, 5, 8, 10)
@@ -76,11 +79,12 @@ class Job:
         self._state = self._t.request("GET", f"/v1/jobs/{self.id}")
         return str(self._state.get("status"))
 
-    def wait(self, timeout: Optional[float] = None) -> Any:
+    def wait(self, timeout: Optional[float] = WAIT_S) -> Any:
         """Blocks until the job is done and returns its result; raises JobFailedError if it failed or was canceled.
 
         Args:
-            timeout: Seconds to wait at most (None: as long as it takes); raises TimeoutError past it, the job still runs.
+            timeout: Seconds to wait at most (default two hours; None: as long as it takes); raises TimeoutError past it, the job
+                still runs.
         """
         until = None if timeout is None else time.monotonic() + timeout
         delays = _delays()
@@ -93,7 +97,7 @@ class Job:
                 self.status()
         return self._convert(_result(self._state))
 
-    def result(self, timeout: Optional[float] = None) -> Any:
+    def result(self, timeout: Optional[float] = WAIT_S) -> Any:
         """The same as wait()."""
         return self.wait(timeout)
 
@@ -115,7 +119,7 @@ class AsyncJob(Job):
         self._state = await self._t.request("GET", f"/v1/jobs/{self.id}")
         return str(self._state.get("status"))
 
-    async def wait(self, timeout: Optional[float] = None) -> Any:  # type: ignore[override]
+    async def wait(self, timeout: Optional[float] = WAIT_S) -> Any:  # type: ignore[override]
         until = None if timeout is None else time.monotonic() + timeout
         delays = _delays()
         with activity("running in the background"):
@@ -127,7 +131,7 @@ class AsyncJob(Job):
                 await self.status()
         return self._convert(_result(self._state))
 
-    async def result(self, timeout: Optional[float] = None) -> Any:  # type: ignore[override]
+    async def result(self, timeout: Optional[float] = WAIT_S) -> Any:  # type: ignore[override]
         return await self.wait(timeout)
 
     async def cancel(self) -> bool:  # type: ignore[override]
