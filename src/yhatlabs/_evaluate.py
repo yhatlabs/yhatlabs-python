@@ -43,11 +43,20 @@ _SEASONS = {
 }
 
 
-def season_for(freq: str) -> int:
+# The seasonal-naive baseline repeats the cycle people see in such data: a week for daily, a year for weekly data (the MASE
+# scale above keeps the benchmark convention, where daily and weekly have no season).
+_BASELINE_SEASONS = {**_SEASONS, "D": 7, "W": 52}
+
+
+def season_for(freq: str, table: Optional[Dict[str, int]] = None) -> int:
     off = pd.tseries.frequencies.to_offset(freq)
     name = off.name.split("-")[0]
-    base = _SEASONS.get(name, 1)
+    base = (table or _SEASONS).get(name, 1)
     return max(1, base // off.n) if base > 1 else 1
+
+
+def baseline_season(freq: str) -> int:
+    return season_for(freq, _BASELINE_SEASONS)
 
 
 Runner = Callable[[List[Item]], Tuple[List[dict], List[float]]]
@@ -289,10 +298,22 @@ def run(
             per = r["targets"] if "targets" in r else {prep.target_cols[0]: r["quantiles"]}
             add(model, mi, it, per, native)
     lv = levels or [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    sm = season or baseline_season(prep.freq)
+    short = 0
     for b in baselines:
-        bm = m if b == "seasonal_naive" else 1
         for it, mi in zip(items, meta):
-            add(b, mi, it, {c: baseline(v, h, bm, lv) for c, v in it.targets.items()}, lv)
+            per = {}
+            for c, v in it.targets.items():
+                bm = sm if b == "seasonal_naive" else 1
+                if bm > 1 and len(v) < 2 * bm:  # less than two seasons of history: repeating one season is noise
+                    bm, short = 1, short + (b == "seasonal_naive")
+                per[c] = baseline(v, h, bm, lv)
+            add(b, mi, it, per, lv)
+    if short:
+        warns.append(
+            f"seasonal_naive repeated the last value (as naive does) for {short} of the series windows: their history is"
+            f" shorter than two seasons of {sm} steps."
+        )
     for name, f in (compare or {}).items():
         if prep.target_cols[1:]:
             raise DataError("compare= supports single-target series.")

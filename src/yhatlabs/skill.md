@@ -32,6 +32,10 @@ fc = yh.forecast(df, h=24, known=["temp"], future=future)  # future: id, time, t
 fc.to_wide()  # one column per series
 ev = yh.evaluate(df, h=24, windows=3)  # ev.summary (skill vs seasonal naive), ev.calibration, ev.plot()
 yh.detect_anomalies(df)  # score, anomaly per recent point
+stream = yh.anomaly_stream(window=512)  # stream.update(new_points): scores for the new points, one call per update
+yh.explain_forecast(
+    df, h=24, known=["temp"], future=future
+)  # effect of each covariate on the median; one forecast each
 yh.fill_gaps(df)  # fills missing values inside series
 
 from yhatlabs import hierarchy  # series that add up (stores -> regions -> total)
@@ -55,11 +59,16 @@ res.out_of_range, res.novelty  # where a row lies outside the training data (nov
 m.predict(test, set_coverage=0.9).prediction_sets  # classification: the classes that hold the true one 90% of the time
 m.effect("temperature")  # how the prediction moves with one column
 m.importance(holdout)  # permutation importance per column
+yhatlabs.outliers(train, test)  # novelty, outlier, out_of_range per row; local, no key
 yh.fit(train, ["strength", "pass"])  # several targets, one FitGroup
-yh.estimate_table(train, target="target", test=test, preset="medium")  # credits before running
+yh.estimate_table(train, target="target", test=test, preset="medium")  # credits before running (decimals, e.g. 0.02)
 m.save("model.json")
 yhatlabs.load("model.json")
-yh.predict(train, "target", test)  # one-shot, nothing kept
+yh.predict(train, "target", test)  # one-shot, no fit saved
+res = yh.predict(train, "target", test, compare=True)  # also XGBoost, random forest, linear, a baseline
+res.comparison.score(actual, ChakraTab=res)  # every model scored the same way on the test rows
+yh.compare(train, "target", test)  # the standard models alone
+job = yh.fit(train, "target", preset="pro", background=True)  # returns at once; job.wait() gives the model
 ```
 
 Plots: `from yhatlabs import plots` then `plots.forecast(fc, history=df)`, `plots.backtest(ev)`, `plots.reliability(ev_table)`,
@@ -79,7 +88,18 @@ yhatlabs whoami
 
 ## Rules
 - Errors raised before sending (`DataError`) say how to fix the input; API errors carry `.request_id`.
+- Tables can be pandas, polars, Spark, Dask or Ray; a distributed table too large for the API raises `DataError`: sample
+  or aggregate it first.
 - Pass `task="classify"` or `task="regress"` for integer targets.
 - Rows grouped by machine, batch, patient or store: pass `groups=`; rows over time: `time_col=` (or validate on later rows).
 - Report uncertainty with the numbers the result gives (coverage, intervals, novelty), not a single point.
-- Large tables are uploaded once automatically; nothing else to do.
+- Large tables are uploaded once automatically, and a table too large for a direct call runs as a background job that the
+  call waits for; nothing else to do.
+- Presets: "fast" (default, seconds), "medium" (about 2-3x slower), "pro" (most accurate, about 4-8x slower than fast).
+- Regression: `prediction` is the point forecast; with quantiles=, `median` and `mean` describe the row's distribution.
+  Ranges add a fixed cost and about 10-20 s the first time on a saved model.
+- Predicting from a saved model is charged on the training table's size (0.5 x its cells) plus the predicted cells.
+- Forecast usage (`fc.usage`): credits for organization keys, series for keys without an organization.
+- Known drivers can sit in the same table: rows after the last value, target blank, known columns filled.
+- `m.save(path, sample=False)` leaves the training-row sample out of the file.
+- `store=False` on a call: it isn't shown in the user's Logs.

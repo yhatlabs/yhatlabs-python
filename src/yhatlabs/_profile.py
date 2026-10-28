@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from ._errors import DataError
+
 SAMPLE_ROWS = 2000
 MAX_CATEGORIES = 500
 CHUNK = 1024
@@ -43,11 +45,15 @@ def build(train: pd.DataFrame, features: List[str], seed: int = 0) -> Dict[str, 
                 "mean": float(x.mean()),
                 "std": sd if sd > 0 else 1.0,
             }
-    sample = train[list(cols)].sample(min(len(train), SAMPLE_ROWS), random_state=seed)
+    sample = train[list(cols)].iloc[_sample_positions(len(train), seed)]
     prof = {"columns": cols, "sample": _json_rows(sample), "rows": int(len(train))}
     enc = _encode(prof, sample)
     prof["reference"] = _reference(enc).tolist()
     return prof
+
+
+def _sample_positions(n: int, seed: int) -> np.ndarray:
+    return pd.RangeIndex(n).to_series().sample(min(n, SAMPLE_ROWS), random_state=seed).to_numpy()
 
 
 def _json_rows(df: pd.DataFrame) -> Dict[str, list]:
@@ -80,11 +86,16 @@ def _encode(prof: Dict[str, Any], df: pd.DataFrame) -> Dict[str, np.ndarray]:
     }
 
 
-def _nn(a: Dict[str, np.ndarray], b: Dict[str, np.ndarray], skip_self: bool = False) -> np.ndarray:
+def _nn(
+    a: Dict[str, np.ndarray], b: Dict[str, np.ndarray], skip_self: bool = False, skip: Optional[np.ndarray] = None
+) -> np.ndarray:
     """Distance from every row of a to its nearest row of b: Euclidean on standardised numbers, plus 1 per differing category.
-    Chunked so memory stays at CHUNK x len(b) floats whatever the column count.
+    Chunked so memory stays at CHUNK x len(b) floats whatever the column count. skip: per row of a, a row of b it is not
+    compared with (itself; -1 for none); skip_self is skip = 0, 1, 2, ... (a and b the same rows).
     """
     out = np.empty(len(a["num"]))
+    if skip_self:
+        skip = np.arange(len(out))
     bn, bc = b["num"], b["cat"]
     bsq = (bn**2).sum(axis=1)
     for i in range(0, len(out), CHUNK):
@@ -93,8 +104,10 @@ def _nn(a: Dict[str, np.ndarray], b: Dict[str, np.ndarray], skip_self: bool = Fa
             d2 = (an**2).sum(axis=1)[:, None] + bsq[None, :] - 2 * an @ bn.T
         for j in range(ac.shape[1]):
             d2 += (ac[:, j : j + 1] != bc[None, :, j]) | (ac[:, j : j + 1] < 0)
-        if skip_self:
-            d2[np.arange(len(an)), np.arange(i, i + len(an))] = np.inf
+        if skip is not None:
+            sk = skip[i : i + CHUNK]
+            r = np.flatnonzero(sk >= 0)
+            d2[r, sk[r]] = np.inf
         out[i : i + CHUNK] = np.sqrt(np.maximum(d2.min(axis=1), 0))
     return out
 
@@ -145,6 +158,75 @@ class Checks:
         return self._oor
 
     def novelty(self) -> Optional[pd.Series]:
-        if self.prof is not None and self._nov is None:
+        if self.prof is not None and self.prof.get("sample") is not None and self._nov is None:
             self._nov = novelty(self.prof, self.test)
         return self._nov
+
+
+def _loo_out_of_range(prof: Dict[str, Any], df: pd.DataFrame) -> pd.Series:
+    """Per row, the columns where it lies outside the range of the other rows: the only row at the minimum or maximum,
+    or the only row with its category.
+    """
+    flags: List[List[str]] = [[] for _ in range(len(df))]
+    for c, info in prof["columns"].items():
+        s = df[c]
+        if info["kind"] == "number":
+            x = pd.to_numeric(s, errors="coerce").to_numpy(dtype=float)
+            fin = np.sort(x[np.isfinite(x)])
+            if len(fin) < 2:
+                continue
+            bad = np.isfinite(x) & ((x < fin[1]) | (x > fin[-2]))
+        elif info["complete"]:
+            v = s.astype(str).where(s.notna())
+            bad = (v.map(v.value_counts()) == 1).to_numpy()
+        else:
+            continue
+        for i in np.flatnonzero(bad):
+            flags[i].append(c)
+    return pd.Series(flags, index=df.index, name="out_of_range")
+
+
+def outliers(train: Any, data: Any = None, *, threshold: float = 0.99) -> pd.DataFrame:
+    """Scores rows by how unlike the training rows they are, locally: nothing is sent and no key is needed. novelty is the
+    distance from a row to its nearest training rows, as a percentile of how far training rows are from each other (0.5 is
+    typical, 0.99 farther than 99% of them); the same measure as PredictionResult.novelty.
+
+    >>> import yhatlabs
+    >>> yhatlabs.outliers(train, new_rows)    # novelty, outlier, out_of_range per new row
+    >>> yhatlabs.outliers(train)              # each training row against the others
+
+    Args:
+        train: The reference table (pandas, polars, Spark, Dask or Ray).
+        data: The rows to score, against the columns they share with train. Default: the training rows themselves, each
+            against the other rows (leave-one-out).
+        threshold: Novelty above which a row is flagged as an outlier.
+
+    Returns:
+        One row per scored row (same index): novelty, outlier (novelty > threshold) and out_of_range (the columns outside
+        the training range, or a category training never had; without data, outside the range of the other rows).
+    """
+    from ._tabular import _frame, _str_columns
+
+    if not 0 < threshold < 1:
+        raise DataError("threshold is a novelty percentile, strictly between 0 and 1 (e.g. 0.99).")
+    tr = _str_columns(_frame(train, "train"), "train")
+    te = None if data is None else _str_columns(_frame(data, "data"), "data")
+    features = [c for c in tr.columns if te is None or c in te.columns]
+    if len(tr) < 2 or not features:
+        raise DataError("outliers needs at least 2 training rows and columns that train and data share.")
+    prof = build(tr.reset_index(drop=True), features)
+    if not prof["columns"]:
+        raise DataError("No column of train has values to compare rows on.")
+    sample = _encode(prof, pd.DataFrame(prof["sample"]))
+    ref = np.asarray(prof["reference"])
+    if te is None:
+        pos = np.full(len(tr), -1)
+        pos[_sample_positions(len(tr), 0)] = np.arange(len(sample["num"]))
+        d = _nn(_encode(prof, tr), sample, skip=pos)
+        oor = _loo_out_of_range(prof, tr)
+    else:
+        d = _nn(_encode(prof, te), sample)
+        oor = out_of_range(prof, te)
+    rows = tr if te is None else te
+    nov = np.searchsorted(ref, d, side="right") / len(ref)
+    return pd.DataFrame({"novelty": nov, "outlier": nov > threshold, "out_of_range": oor.to_numpy()}, index=rows.index)

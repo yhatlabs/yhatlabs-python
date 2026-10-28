@@ -183,7 +183,7 @@ class ChakraTabRegressor(RegressorMixin, _ChakraTab):
         return self._call(X).predictions.to_numpy(dtype=float)
 
     def predict_quantiles(self, X: Any, quantiles: Any = (0.05, 0.5, 0.95)) -> pd.DataFrame:
-        """Prediction intervals: one column per level (split-conformal on out-of-sample errors)."""
+        """Prediction intervals: one column per level, from each row's predictive distribution."""
         q = self._call(X, list(quantiles)).quantiles.copy()
         if isinstance(X, pd.DataFrame):
             q.index = X.index  # rows line up with the caller's X, like the rest of their DataFrame

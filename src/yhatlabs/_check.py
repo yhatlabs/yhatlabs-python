@@ -10,7 +10,7 @@ from typing import Any, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 
-from ._forecast import ID_NAMES, TARGET_NAMES, TIME_NAMES, Limits, _infer_freq, _pick
+from ._forecast import ID_NAMES, TARGET_NAMES, TIME_NAMES, Limits, _infer_freq, _pandas, _pick, to_offset
 
 SEVERITIES = ("error", "warning", "note")
 
@@ -76,14 +76,15 @@ def _issue(rows: list, severity: str, code: str, where: Any, detail: str, sugges
 
 
 def _frame(data: Any) -> pd.DataFrame:
-    if hasattr(data, "to_pandas") and not isinstance(data, pd.DataFrame):  # polars
-        data = data.to_pandas()
+    data = _pandas(data)  # polars, Spark, Dask, Ray
     if isinstance(data, pd.Series):
         data = data.to_frame(name=data.name or "y")
         if isinstance(data.index, pd.DatetimeIndex):
             data = data.rename_axis("ds").reset_index()
     if not isinstance(data, pd.DataFrame):
-        raise TypeError("check() takes a pandas or polars DataFrame (or a Series with a DatetimeIndex).")
+        raise TypeError(
+            "check() takes a pandas, polars, Spark, Dask or Ray DataFrame (or a Series with a DatetimeIndex)."
+        )
     return data.rename(columns=str)
 
 
@@ -194,7 +195,7 @@ def _check_series(df: pd.DataFrame, h, target, id_col, time_col, freq, limits: L
     other = [c for c in cols if c not in (id_col, time_col, target)]
     for uid, g in df.dropna(subset=[time_col]).sort_values(time_col).groupby(id_col, sort=False):
         t = pd.DatetimeIndex(g[time_col].drop_duplicates())
-        off = pd.tseries.frequencies.to_offset(freq) if freq else _infer_freq(t)
+        off = to_offset(freq) if freq else _infer_freq(t)
         y = pd.to_numeric(g[target], errors="coerce")
         n, n_missing = len(g), int(y.isna().sum())
         gaps = 0

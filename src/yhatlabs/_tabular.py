@@ -24,7 +24,15 @@ EVAL_METRIC = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 EXACT_INT = 2**53  # larger ints lose precision as JSON numbers on the way through the gateway
 
 TASKS = ("classify", "regress")
-PRESETS = ("fast", "medium", "full")
+# the API's and other libraries' names for the same two tasks, so task="regression" works as well as task="regress"
+_TASK_ALIASES = {"regression": "regress", "classification": "classify", "binary": "classify", "multiclass": "classify"}
+
+
+def norm_task(task: Optional[str]) -> Optional[str]:
+    return _TASK_ALIASES.get(task, task) if isinstance(task, str) else task
+
+
+PRESETS = ("fast", "medium", "pro", "full")  # "pro" is the name the playground uses for "full"
 PARQUET_ABOVE_BYTES = 4 * 1024 * 1024  # JSON rows below this; parquet (when pyarrow is installed) above
 
 
@@ -96,10 +104,10 @@ def encode_table(df: pd.DataFrame) -> Tuple[Any, float]:
     return to_records(df), size
 
 
-def _frame(x: Any, what: str) -> pd.DataFrame:
+def _frame(x: Any, what: str, limits: Optional[Limits] = None) -> pd.DataFrame:
     from ._forecast import _pandas
 
-    x = _pandas(x)
+    x = _pandas(x, limits)
     if isinstance(x, pd.DataFrame):
         return x
     if isinstance(x, (list, tuple)) and x and isinstance(x[0], dict):
@@ -118,6 +126,7 @@ def _str_columns(df: pd.DataFrame, what: str) -> pd.DataFrame:
 
 
 def problem_type(y: pd.Series, task: Optional[str]) -> Optional[str]:
+    task = norm_task(task)
     if task is not None and task not in TASKS:
         raise DataError(f"task must be one of {TASKS} or None (infer); got {task!r}.")
     if (
@@ -169,7 +178,7 @@ def prepare_train(
 ) -> Tuple[pd.DataFrame, Optional[str], List[str]]:
     """Validate the training table; returns (train with an observed target, problem_type, warnings)."""
     warns: List[str] = []
-    train = _str_columns(_frame(train, "train"), "train")
+    train = _str_columns(_frame(train, "train", limits), "train")
     if target not in train.columns:
         raise DataError(f"target {target!r} is not a column of train. Columns: {list(train.columns)}")
     missing = train[target].isna()
@@ -188,7 +197,7 @@ def prepare_train(
 def prepare_test(test: Any, features: List[str], target: str, limits: Limits) -> Tuple[pd.DataFrame, List[str]]:
     """Validate the rows to score against the training columns; keeps the caller's index."""
     warns: List[str] = []
-    test = _str_columns(_frame(test, "test"), "test")
+    test = _str_columns(_frame(test, "test", limits), "test")
     if target in test.columns:
         if test[target].notna().any():
             warns.append(f"test has the target column {target!r}; it was dropped before sending.")
@@ -449,16 +458,3 @@ def parse(
             np.asarray(reply["quantiles"], dtype=float), index=test.index, columns=[qname(lv) for lv in levels]
         )
     return out, None, None, q
-
-
-def estimate(rates: Dict[str, Any], train_rows: int, features: int, preset: str, predict_rows: int) -> Dict[str, Any]:
-    """Credits of a fit and a prediction under the API's published rates (GET /v1/limits, pricing.tabular)."""
-    if not rates:
-        raise UnsupportedError(
-            "This API publishes no tabular pricing; the estimate needs GET /v1/limits to include it."
-        )
-    lo = int(rates.get("min_credits", 1))
-    mult = (rates.get("preset_multiplier") or {}).get(preset, 1)
-    fit = max(lo, math.ceil(train_rows * max(1, features) / rates["fit_cells_per_credit"])) * mult if train_rows else 0
-    pred = max(lo, math.ceil(predict_rows / rates["predict_rows_per_credit"])) if predict_rows else 0
-    return {"fit": fit, "predict": pred, "total": fit + pred, "unit": rates.get("unit", "credits")}

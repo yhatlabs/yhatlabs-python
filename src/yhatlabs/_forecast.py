@@ -41,6 +41,16 @@ class Limits:
     pricing: Dict[str, Any] = field(
         default_factory=dict
     )  # what calls cost, as the API publishes it (estimate_table reads it)
+    tabular_direct: Dict[str, Dict[str, int]] = field(
+        default_factory=dict
+    )  # per preset, the largest table a direct call takes ({"rows", "columns"}); larger ones run as jobs
+    max_tabular_columns: Optional[int] = None
+    max_cells_async: Optional[int] = None
+
+    def direct_fits(self, preset: Optional[str], rows: int, columns: int) -> bool:
+        """Whether a table call of this size gets a direct answer (True when the API publishes no direct size)."""
+        d = self.tabular_direct.get({"full": "pro"}.get(preset or "fast", preset or "fast"))
+        return not d or (rows <= d.get("rows", rows) and columns <= d.get("columns", columns))
 
     @classmethod
     def from_api(cls, lim: dict) -> Limits:
@@ -56,6 +66,9 @@ class Limits:
             max_columns=f.get("max_columns", d.max_columns),
             capabilities=dict(lim.get("capabilities") or {}),
             pricing=dict(lim.get("pricing") or {}),
+            tabular_direct={k: dict(v) for k, v in (t.get("direct") or {}).items() if isinstance(v, dict)},
+            max_tabular_columns=t.get("max_columns"),
+            max_cells_async=t.get("max_cells_async"),
         )
 
     def supports(self, feature: str) -> bool:
@@ -106,11 +119,66 @@ class Prepared:
     warnings: List[str]
 
 
-def _pandas(x: Any) -> Any:
-    """Polars (or anything else with .to_pandas()) in, pandas out; everything else unchanged."""
-    if x is not None and not isinstance(x, (pd.DataFrame, pd.Series)) and hasattr(x, "to_pandas"):
-        return x.to_pandas()
-    return x
+LAZY_NAMES = {"spark": "Spark DataFrame", "dask": "Dask DataFrame", "ray": "Ray Dataset", "polars": "polars LazyFrame"}
+
+
+def _lazy(x: Any) -> Optional[str]:
+    """Which lazy or distributed frame `x` is (spark, dask, ray, polars LazyFrame), by its type's module; None otherwise.
+    Nothing is imported: only objects of those libraries match.
+    """
+    root = type(x).__module__.split(".")[0]
+    if root == "pyspark" and hasattr(x, "toPandas"):
+        return "spark"
+    if root in ("dask", "dask_expr") and hasattr(x, "compute"):
+        return "dask"
+    if root == "ray" and hasattr(x, "to_pandas"):
+        return "ray"
+    if root == "polars" and type(x).__name__ == "LazyFrame":
+        return "polars"
+    return None
+
+
+def _columns(x: Any, kind: str) -> int:
+    if kind == "ray":
+        return len(x.schema().names)
+    if kind == "polars":
+        return len(x.collect_schema() if hasattr(x, "collect_schema") else x.schema)
+    return len(x.columns)
+
+
+def _collect(x: Any, kind: str, n: Optional[int]) -> pd.DataFrame:
+    """The frame in pandas: all of it, or its first n rows (so a frame past the limit is never pulled in whole)."""
+    if kind == "spark":
+        return (x if n is None else x.limit(n)).toPandas()
+    if kind == "dask":
+        return x.compute() if n is None else x.head(n, npartitions=-1)
+    if kind == "ray":
+        return (x if n is None else x.limit(n)).to_pandas()
+    return (x if n is None else x.head(n)).collect().to_pandas()
+
+
+def _pandas(x: Any, limits: Optional[Limits] = None) -> Any:
+    """Polars, Spark, Dask and Ray frames (or anything else with .to_pandas()) in, pandas out; everything else unchanged.
+    With limits (a table for the API), a lazy or distributed frame larger than the API takes raises DataError before it is
+    collected in full.
+    """
+    if x is None or isinstance(x, (pd.DataFrame, pd.Series)):
+        return x
+    kind = _lazy(x)
+    if kind is None:
+        return x.to_pandas() if hasattr(x, "to_pandas") else x
+    if limits is None:
+        return _collect(x, kind, None)
+    cap = limits.max_tabular_rows
+    if limits.max_cells_async:
+        cap = min(cap, limits.max_cells_async // max(1, _columns(x, kind)))
+    df = _collect(x, kind, cap + 1)
+    if len(df) > cap:
+        raise DataError(
+            f"The {LAZY_NAMES[kind]} has more than {cap} rows, more than the API takes in one call. Sample or aggregate it "
+            "first (e.g. .sample() or a group-by), then pass the result."
+        )
+    return df
 
 
 def _clean(v: Any) -> Optional[Union[float, str]]:
@@ -177,11 +245,28 @@ def _pick(cols: Sequence[str], names: Sequence[str]) -> Optional[str]:
     return None
 
 
+FREQ_ALIASES = (
+    "D (daily), W (weekly), MS or M (monthly), QS (quarterly), YS (yearly), h (hourly), 15min, 30min, B (business days)"
+)
+
+
+def to_offset(freq: Any) -> pd.DateOffset:
+    """freq= as a pandas offset, or a DataError naming the aliases people use."""
+    try:
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore", FutureWarning)
+            return pd.tseries.frequencies.to_offset(freq)
+    except (ValueError, TypeError):
+        raise DataError(f"freq={freq!r} is not a pandas frequency. Common ones: {FREQ_ALIASES}.") from None
+
+
 def _infer_freq(times: pd.DatetimeIndex) -> Optional[pd.DateOffset]:
     if len(times) < 3:
         return None
     try:
-        f = pd.infer_freq(times)
+        with _warnings.catch_warnings():  # pandas warns about its own alias renames here; not the caller's concern
+            _warnings.simplefilter("ignore", FutureWarning)
+            f = pd.infer_freq(times)
     except (ValueError, TypeError):
         f = None
     if f:
@@ -371,12 +456,19 @@ def prepare(
         dup = df[df.duplicated([id_col, time_col], keep=False)][[id_col, time_col]].head(3).values.tolist()
         raise DataError(f"Duplicate (id, time) rows, e.g. {dup}. Each series needs one row per timestamp.")
     df = df.sort_values([id_col, time_col], kind="stable")
+    if known and future is None:
+        # one table: rows after a series' last value, with the target blank and the known columns filled, are its future
+        last = df[targets].notna().any(axis=1).groupby(df[id_col]).transform(lambda m: m[::-1].cummax()[::-1])
+        if (~last).any():
+            future, df = df.loc[~last, [id_col, time_col, *known]], df.loc[last]
+            warns.append(f"Used the {int((~last).sum())} rows after the last value as future= (their {known} values).")
 
     fut = None
     if known:
         if future is None:
             raise DataError(
-                f"known={known} needs future= : a DataFrame with {id_col!r}, {time_col!r} and those columns over the next {h} steps."
+                f"known={known} needs future= : a DataFrame with {id_col!r}, {time_col!r} and those columns over the next {h} steps"
+                " (or rows after the last value in the same table, with the target blank)."
             )
         fut = future.copy()
         fut.columns = [str(c) for c in fut.columns]
@@ -397,8 +489,9 @@ def prepare(
 
     offsets = {}
     groups = list(df.groupby(id_col, sort=False))
-    req_off = pd.tseries.frequencies.to_offset(freq) if freq else None
+    req_off = to_offset(freq) if freq else None
     filled_total = 0
+    short = []
     items: List[Item] = []
     for uid, g in groups:
         g = g.reset_index(drop=True)
@@ -431,6 +524,8 @@ def prepare(
                 f"Series {uid!r} has {T} points; only the most recent {limits.max_points_per_series} were sent."
             )
             T = len(g)
+        if T < h:
+            short.append(uid)
         tvals = {c: _numeric_list(g[c], f"series {uid!r} column {c!r}", warns) for c in targets}
         if not any(v is not None for vs in tvals.values() for v in vs):
             raise DataError(f"Series {uid!r} has no observed values.")
@@ -465,6 +560,11 @@ def prepare(
         items.append(item)
     if filled_total:
         warns.append(f"Filled {filled_total} missing timestamps with gaps (sent as missing values).")
+    if short:
+        warns.append(
+            f"The horizon ({h} steps) is longer than the history of {len(short)} series (e.g. {short[0]!r}); forecasts that"
+            " far ahead of so little data are rough."
+        )
     distinct = {_freq_str(o) for o in offsets.values()}
     if len(distinct) > 1:
         raise DataError(
@@ -647,6 +747,17 @@ def build_history(prep: Prepared, kept: List[Tuple[Item, dict]], levels: Sequenc
     return pd.concat(frames, ignore_index=True) if frames else None
 
 
+def _caller_level() -> int:
+    """The stacklevel of the first frame outside this package, so a warning points at the user's line."""
+    import sys
+
+    pkg = __name__.rsplit(".", 1)[0]
+    f, level = sys._getframe(1), 1
+    while f is not None and (f.f_globals.get("__name__") or "").split(".")[0] == pkg:
+        f, level = f.f_back, level + 1
+    return level
+
+
 def warn_all(msgs: List[str]) -> None:
     for m in msgs:
-        _warnings.warn(m, stacklevel=3)
+        _warnings.warn(m, stacklevel=_caller_level())

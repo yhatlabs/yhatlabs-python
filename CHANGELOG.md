@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.2.1
+
+- Large tables run as background jobs. A fit or one-shot predict larger than a direct call takes (the sizes `GET /v1/limits`
+  publishes per preset) is sent as a job and waited for, so the result is the same; `background=True` returns a `Job` at
+  once instead (`job.status()`, `job.wait(timeout=)`, `job.cancel()`). A long call the API hands back as a job is waited
+  for too. Refs #13.
+- `compare=True` on `predict` (or `yh.compare(train, target, test)`) trains standard models on the same rows: XGBoost,
+  a random forest and a linear model (LightGBM on request), plus a naive baseline. `res.comparison.score(actual, ChakraTab=res)`
+  scores them all the same way.
+- `preset="pro"` is accepted (the same as `"full"`: 8-fold bagging, the most accurate).
+- `store=False` on `forecast`, `predict`, `fit` and `compare`: the call isn't shown in your Logs.
+- Credits are decimals (for example `usage["credits"] == 0.02`). `estimate_table()` asks the API (`POST /v1/estimate`)
+  instead of working the price out locally, and returns `tokens` too.
+- Fits are kept 30 days after their last use by default; `fit(..., ttl_days=)` sets 1 to 365. The docs said 24 hours.
+- Forecasts split over several requests report their credits added up in `fc.usage` (for organization keys).
+- `model.save()` stores only the distinct classes, never one label per row; `save(path, sample=False)` (and
+  `FitGroup.save`) leaves out the sample of training rows. The model's repr shows the class count, not every class.
+- `FittedModel.usage` holds what the fit cost; `m.expired` is True after `delete()` or a `with` block, and a second
+  `delete()` does nothing.
+- `evaluate()`: the seasonal-naive baseline repeats the last week on daily data and the last year on weekly data (it
+  repeated the last value), falling back to the last value when the history is shorter than two seasons.
+- One table can carry the future of known drivers: rows after a series' last value, with the target blank, are used as
+  `future=`.
+- Clearer errors: `level=[0.8]` (levels are percentages), an unknown preset in `estimate_table()`, and a `freq=` pandas
+  doesn't know. A horizon longer than the history warns, and warnings point at your own line.
+- `JobFailedError.job_id` names the job; `comparison.score()` adds ROC AUC for two classes.
+- CLI: `--json` also after the subcommand, `--preset pro`, `predict --compare`, `--no-store` on `predict` and `forecast`.
+- Spark, Dask, Ray and polars (DataFrame and LazyFrame) tables are accepted wherever a table is. A lazy or distributed
+  table sent as a tabular table is checked against the API's size first, and a larger one raises `DataError` before it
+  is collected. Closes #11.
+- `yh.anomaly_stream(window=512)` scores points as they arrive: `stream.update(new_points)` returns scores for the new
+  points only and keeps the last `window` points of every series (one `detect_anomalies` call per update). Closes #15.
+- `yh.explain_forecast(df, h, known=[...], past=[...])` shows how much each covariate moves the median, step by step,
+  with an average per covariate in `.attrs["summary"]`. It costs one extra forecast per covariate. Closes #10.
+- `yhatlabs.outliers(train, data)` scores rows by how unlike the training rows they are (novelty, an `outlier` flag and
+  the columns outside the training range); without `data`, each training row against the others. Local, no key needed.
+  Closes #17.
+
 ## 0.2.0 (2026-10-15)
 
 - `orjson` is now a default dependency, for faster encoding of large requests (the `[fast]` extra now adds pyarrow only).
