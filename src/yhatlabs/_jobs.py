@@ -51,7 +51,7 @@ def _failure(state: dict) -> JobFailedError:
     return JobFailedError(
         message,
         job_id=state.get("id"),
-        status=409 if canceled else 500,
+        status=409 if canceled else 422 if etype == "invalid_request_error" else 500,
         type=etype,
         request_id=err.get("request_id"),
         body=state,

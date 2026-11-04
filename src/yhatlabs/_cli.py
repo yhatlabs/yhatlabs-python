@@ -64,6 +64,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         prog="yhatlabs", description="YHat Labs prediction API from the command line (key: YHAT_API_KEY)."
     )
     ap.add_argument("--base-url")
+    from ._version import __version__
+
+    ap.add_argument("--version", action="version", version=f"yhatlabs {__version__}")
     ap.add_argument(
         "--json", action="store_true", help="machine-readable output (JSON records), e.g. for agents and scripts"
     )
@@ -76,7 +79,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         f.add_argument("--level"),
     )
     f.add_argument("--future", help="file with future values of the --known columns"), f.add_argument("-o", "--output")
+    f.add_argument("--preset", choices=["fast", "pro"], help="pro: slower, slightly sharper")
+    f.add_argument("--tune", help="a tune id from `yhatlabs tune`: forecast with the model tuned on your series")
     _cols(f)
+    tu = sub.add_parser("tune", help="fine-tune the time-series model on your series (a few minutes)")
+    (
+        tu.add_argument("data"),
+        tu.add_argument("--h", type=int, required=True),
+        tu.add_argument("--steps", type=int, default=300),
+    )
+    tu.add_argument("--name"), tu.add_argument("--future", help="file with future values of the --known columns")
+    _cols(tu)
     e = sub.add_parser("evaluate", help="rolling backtest against baselines")
     (
         e.add_argument("data"),
@@ -115,13 +128,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         et.add_argument("--preset", choices=["fast", "medium", "pro", "full"], metavar="{fast,medium,pro}"),
     )
     et.add_argument("--model"), et.add_argument("-o", "--output", help="write every row's out-of-fold prediction here")
-    for name in ("models", "usage", "limits", "fits", "whoami"):
+    for name in ("models", "usage", "limits", "fits", "tunes", "whoami"):
         sub.add_parser(name)
     k = sub.add_parser("check", help="check a file locally before sending it (no key needed)")
     (
         k.add_argument("data"),
         k.add_argument("--h", type=int),
-        k.add_argument("--target"),
+        k.add_argument("--target", "--target-col", dest="target", help="the column to predict (a table) or forecast"),
         k.add_argument("--id-col"),
         k.add_argument("--time-col"),
     )
@@ -163,12 +176,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         with Client(base_url=args.base_url) as yh:
-            if args.cmd in ("models", "usage", "limits", "fits", "whoami"):
+            if args.cmd in ("models", "usage", "limits", "fits", "tunes", "whoami"):
                 out = {
                     "models": yh.models,
                     "usage": yh.usage,
                     "limits": lambda: yh.server_limits(apply=False),
                     "fits": yh.fits,
+                    "tunes": yh.tunes,
                     "whoami": yh.whoami,
                 }[args.cmd]()
                 print(json.dumps(out, indent=2, default=str))
@@ -243,9 +257,26 @@ def main(argv: Optional[List[str]] = None) -> int:
                     level=_floats(args.level),
                     future=_read(args.future) if args.future else None,
                     store=args.store,
+                    preset=args.preset,
+                    tune=args.tune,
                     **common,
                 )
                 _write(fc.df, args.output)
+            elif args.cmd == "tune":
+                t = yh.tune(
+                    data,
+                    args.h,
+                    steps=args.steps,
+                    name=args.name,
+                    future=_read(args.future) if args.future else None,
+                    **common,
+                )
+                out = {"id": t.id, "used": t.used, "holdout": t.holdout, "usage": t.usage}
+                print(
+                    json.dumps(out, indent=2, default=str)
+                    if JSON_OUT
+                    else f"{t!r}\nforecast with it: yhatlabs forecast DATA --h {t.horizon} --tune {t.id}"
+                )
             elif args.cmd == "evaluate":
                 common.pop("model", None)
                 ev = yh.evaluate(
