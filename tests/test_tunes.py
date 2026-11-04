@@ -112,3 +112,27 @@ def test_async_tune(aclient, hourly):
 
     t, fc = asyncio.run(run())
     assert t.used and len(fc.df) == 48
+
+
+def test_a_refused_tune_is_an_input_error(client, api, hourly, monkeypatch):
+    from yhatlabs import JobFailedError
+
+    orig = TuneAPI.__call__
+
+    def failing(self, request):
+        if request.url.path.startswith("/v1/jobs/"):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "job_x",
+                    "object": "job",
+                    "status": "failed",
+                    "error": {"type": "invalid_request_error", "message": "not enough history to tune"},
+                },
+            )
+        return orig(self, request)
+
+    monkeypatch.setattr(TuneAPI, "__call__", failing)
+    with pytest.raises(JobFailedError) as e:
+        client.tune(hourly, 24)
+    assert e.value.status == 422 and "not enough history" in str(e.value)
