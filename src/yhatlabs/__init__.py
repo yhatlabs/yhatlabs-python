@@ -27,12 +27,15 @@ from ._jobs import AsyncJob, Job, JobFailedError
 from ._profile import outliers
 from ._results import EvaluationResult, ForecastResult, PredictionResult
 from ._table_eval import TableEvaluation
+from ._tunes import AsyncTuned, Tuned
 from ._version import __version__
 
 __all__ = [
     "Client",
     "AsyncClient",
     "FittedModel",
+    "Tuned",
+    "AsyncTuned",
     "check",
     "outliers",
     "load",

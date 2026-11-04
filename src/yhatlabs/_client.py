@@ -37,6 +37,7 @@ from ._mask import Mask, masked
 from ._results import EvaluationResult, ForecastResult, PredictionResult
 from ._table_eval import TableEvaluation
 from ._transport import AsyncTransport, SyncTransport
+from ._tunes import AsyncTuned, Tuned
 from ._version import __version__
 
 DEFAULT_TS_MODEL = "chakra-ts"
@@ -70,6 +71,59 @@ def _body(
         body["season"] = int(season)
     body.update(extra or {})
     return body
+
+
+def _preset_tune(extra: dict, preset: Optional[str], tune: Any) -> None:
+    if preset is not None:
+        if preset not in ("fast", "pro"):
+            raise DataError("preset must be 'fast' or 'pro'.")
+        extra["preset"] = preset
+    if tune is not None:
+        extra["tune"] = tune.id if isinstance(tune, Tuned) else str(tune)
+
+
+def _tune_body(
+    limits: Limits,
+    data: Any,
+    h: int,
+    model: str,
+    steps: int,
+    name: Optional[str],
+    ttl_days: Optional[float],
+    store: Optional[bool],
+    season: Optional[int],
+    calendar: Any,
+    **prep_kw: Any,
+) -> dict:
+    """One tune request: every series in a single request (a tune learns from them together)."""
+    if not 50 <= steps <= 1000:
+        raise DataError("steps must be 50 to 1000.")
+    kw = {k: prep_kw[k] for k in ("id_col", "time_col", "freq", "target_col")}
+    data, future, known = _with_calendar(
+        data,
+        prep_kw["future"],
+        h,
+        calendar,
+        prep_kw["known"],
+        kw["id_col"],
+        kw["time_col"],
+        kw["freq"],
+        kw["target_col"],
+    )
+    prep = _prep(data, h, limits, known=known, past=prep_kw["past"], static=prep_kw["static"], future=future, **kw)
+    if len(batches(prep.items, limits)) > 1:
+        raise DataError(
+            f"A tune takes the series of one request: at most {limits.max_series} series and {limits.max_total_points:,} points "
+            "(covariates included). Tune on a representative subset; forecasts with the tune can then cover every series."
+        )
+    extra: dict = {"steps": int(steps)}
+    if name is not None:
+        extra["name"] = name
+    if ttl_days is not None:
+        extra["ttl_days"] = float(ttl_days)
+    if store is False:
+        extra["store"] = False
+    return _body(prep.items, h, prep.freq, model, season, extra)
 
 
 def _fit_extras(body: dict, ttl_days: Optional[float], store: Optional[bool]) -> None:
@@ -598,6 +652,8 @@ class Client(_Base):
         history: bool = False,
         mask_columns: Optional[bool] = None,
         store: Optional[bool] = None,
+        preset: Optional[str] = None,
+        tune: Any = None,
     ) -> ForecastResult:
         """Forecast the next `h` steps of every series in `data`.
 
@@ -617,6 +673,9 @@ class Client(_Base):
             samples: Return this many sample paths per series (1 to 1000) in result.samples.
             seed: Random seed for the sample paths.
             history: Also return the model's forecasts of the windows just before the forecast (result.history).
+            preset: "fast" (default) or "pro": slower and slightly sharper, on models that offer presets.
+            tune: A Tuned (or its id) from Client.tune(): forecast with the model tuned on your series. When the tune did not
+                beat the zero-shot model on your latest window (tuned.used is False), this is the zero-shot forecast.
             store: False: the call isn't shown in your Logs (see the data-handling page in the docs).
             mask_columns: Send target and covariate names as c0, c1, ...; the result keeps your names. Default: the client's
                 setting (False).
@@ -651,6 +710,7 @@ class Client(_Base):
         extra = _forecast_extra(self.limits, quantiles, samples, seed, history)
         if store is False:
             extra["store"] = False
+        _preset_tune(extra, preset, tune)
         prep = _prep(
             data,
             h,
@@ -1548,6 +1608,88 @@ class Client(_Base):
         """This key's live fits: [{id, model, target, created_at, expires_at}]."""
         return self._t.request("GET", "/v1/table/fits")["data"]
 
+    def tune(
+        self,
+        data: Any,
+        h: int,
+        *,
+        model: str = DEFAULT_TS_MODEL,
+        steps: int = 300,
+        name: Optional[str] = None,
+        ttl_days: Optional[float] = None,
+        freq: Optional[str] = None,
+        id_col: Optional[str] = None,
+        time_col: Optional[str] = None,
+        target_col: Target = None,
+        known: Cols = None,
+        past: Cols = None,
+        static: Cols = None,
+        future: Optional[pd.DataFrame] = None,
+        season: Optional[int] = None,
+        calendar: Calendar = None,
+        background: bool = False,
+        store: Optional[bool] = None,
+    ) -> Union[Tuned, Job]:
+        """Fine-tune the time-series model on your series, so later forecasts use what it learned from them (paydays,
+        promotions, your own seasonality). Runs in the background on our side, a few minutes; returns a Tuned (or its Job
+        with background=True).
+
+        The tune trains on all but the last `h` steps of every series and scores itself there against the zero-shot model:
+        tuned.used says whether it won, tuned.holdout has the numbers, and a tune that did not win forecasts like the zero-shot
+        model. Then: tuned.forecast(data) or client.forecast(data, h, tune=tuned). Numeric known covariates (with their
+        future values in `future`) are part of the tuning; the series need at least 2 x h + 64 values.
+
+        Args:
+            data: The history, as for forecast(): a long table (id, time, target, covariates), a Series, an array or a dict.
+            h: The horizon the tune is for (and scored on).
+            steps: Training steps, 50 to 1000 (default 300); the best count is chosen on the holdout.
+            name: A label for the tune.
+            ttl_days: How long the tune is kept after its last use (default 30, at most 365).
+            background: Return the Job at once; job.wait() gives the Tuned.
+            model: The time-series model to tune.
+            freq: The series' frequency as a pandas alias; inferred from the timestamps when left out.
+            id_col: The column naming each series.
+            time_col: The timestamp column.
+            target_col: The column (or columns) to forecast.
+            known: Covariate columns whose future values you know; their next h values go in future=.
+            past: Covariate columns known only up to now.
+            static: Columns constant per series.
+            future: The known covariates over the next h steps.
+            season: The seasonal period in steps, to fix it instead of inferring it from freq.
+            calendar: True adds hour, weekday, month and weekend as known covariates.
+            store: False: the call isn't shown in your Logs.
+        """
+        body = _tune_body(
+            self.limits,
+            data,
+            h,
+            model,
+            steps,
+            name,
+            ttl_days,
+            store,
+            season,
+            calendar,
+            freq=freq,
+            id_col=id_col,
+            time_col=time_col,
+            target_col=target_col,
+            known=known,
+            past=past,
+            static=static,
+            future=future,
+        )
+        job = Job(self._t, self._t.request("POST", "/v1/series/tunes", body), lambda r: Tuned.from_reply(r, self))
+        return job if background else job.wait()
+
+    def get_tune(self, tune_id: str) -> Tuned:
+        """Reattach to a tune by id."""
+        return Tuned.from_reply(self._t.request("GET", f"/v1/series/tunes/{tune_id}"), self)
+
+    def tunes(self) -> List[Dict[str, Any]]:
+        """This project's live tunes, newest first."""
+        return self._t.request("GET", "/v1/series/tunes")["data"]
+
     def impute(
         self,
         df: pd.DataFrame,
@@ -1695,6 +1837,8 @@ class AsyncClient(_Base):
         history: bool = False,
         mask_columns: Optional[bool] = None,
         store: Optional[bool] = None,
+        preset: Optional[str] = None,
+        tune: Any = None,
     ) -> ForecastResult:
         t0 = time.monotonic()
         data, future, known = _with_calendar(data, future, h, calendar, known, id_col, time_col, freq, target_col)
@@ -1702,6 +1846,7 @@ class AsyncClient(_Base):
         extra = _forecast_extra(self.limits, quantiles, samples, seed, history)
         if store is False:
             extra["store"] = False
+        _preset_tune(extra, preset, tune)
         prep = _prep(
             data,
             h,
@@ -2053,6 +2198,54 @@ class AsyncClient(_Base):
         out.warnings = list(dict.fromkeys(str(x.message) for x in w))
         warn_all(out.warnings)
         return out
+
+    async def tune(
+        self,
+        data: Any,
+        h: int,
+        *,
+        model: str = DEFAULT_TS_MODEL,
+        steps: int = 300,
+        name: Optional[str] = None,
+        ttl_days: Optional[float] = None,
+        freq: Optional[str] = None,
+        id_col: Optional[str] = None,
+        time_col: Optional[str] = None,
+        target_col: Target = None,
+        known: Cols = None,
+        past: Cols = None,
+        static: Cols = None,
+        future: Optional[pd.DataFrame] = None,
+        season: Optional[int] = None,
+        calendar: Calendar = None,
+        background: bool = False,
+        store: Optional[bool] = None,
+    ) -> Union[AsyncTuned, AsyncJob]:
+        """Asyncio version of Client.tune."""
+        body = _tune_body(
+            self.limits,
+            data,
+            h,
+            model,
+            steps,
+            name,
+            ttl_days,
+            store,
+            season,
+            calendar,
+            freq=freq,
+            id_col=id_col,
+            time_col=time_col,
+            target_col=target_col,
+            known=known,
+            past=past,
+            static=static,
+            future=future,
+        )
+        job = AsyncJob(
+            self._t, await self._t.request("POST", "/v1/series/tunes", body), lambda r: AsyncTuned.from_reply(r, self)
+        )
+        return job if background else await job.wait()
 
     async def fit(
         self,
