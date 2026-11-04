@@ -323,7 +323,10 @@ def prepare(
     if not isinstance(h, (int, np.integer)) or h < 1:
         raise DataError("h (the horizon) must be a positive integer.")
     if h > limits.max_horizon:
-        raise DataError(f"h={h} is above the API's maximum horizon of {limits.max_horizon}.")
+        raise DataError(
+            f"h={h} is above the maximum horizon of {limits.max_horizon:,} steps. Forecast at a coarser frequency: resample "
+            "to the resolution you decide at (e.g. 5-second data to 1 minute: h=180 for 3 hours), then forecast."
+        )
     warns: List[str] = []
 
     # ---- plain arrays / dicts / Series without timestamps ----

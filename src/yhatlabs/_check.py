@@ -4,12 +4,14 @@ changed on the way (sorting, gap filling, truncation), and what is likely to hur
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
 
+from ._errors import DataError
 from ._forecast import ID_NAMES, TARGET_NAMES, TIME_NAMES, Limits, _infer_freq, _pandas, _pick, to_offset
 
 SEVERITIES = ("error", "warning", "note")
@@ -88,6 +90,24 @@ def _frame(data: Any) -> pd.DataFrame:
     return data.rename(columns=str)
 
 
+def _date_column(df: pd.DataFrame) -> Optional[str]:
+    """The first column holding dates when none is named like one (e.g. Month = 1949-01): a datetime column, or text that
+    parses as dates on nearly every row. Numbers are never taken for dates.
+    """
+    for c in df.columns:
+        v = df[c]
+        if pd.api.types.is_datetime64_any_dtype(v):
+            return str(c)
+        if v.dtype == object or pd.api.types.is_string_dtype(v):
+            sample = v.dropna().astype(str).head(200)
+            if len(sample) and not sample.str.fullmatch(r"[-+]?\d+(\.\d+)?").all():
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    if pd.to_datetime(sample, errors="coerce").notna().mean() >= 0.95:
+                        return str(c)
+    return None
+
+
 def check(
     data: Any,
     *,
@@ -116,10 +136,13 @@ def check(
     """
     df = _frame(data)
     cols = list(df.columns)
-    tcol = time_col or _pick(cols, TIME_NAMES)
+    tcol = time_col or _pick(cols, TIME_NAMES) or (None if target is not None else _date_column(df))
     if tcol is None or (target is not None and time_col is None and _pick(cols, TIME_NAMES) is None):
         if target is None:
-            raise ValueError("No time column found; for a table pass target= (the column to predict).")
+            raise DataError(
+                f"No time column found among {cols[:12]}: pass time_col= (the timestamps) for time series, or target= "
+                "(the column to predict) for a table."
+            )
         return _check_table(df, target if isinstance(target, str) else list(target)[0], limits or Limits())
     return _check_series(df, h, target, id_col, tcol, freq, limits or Limits())
 

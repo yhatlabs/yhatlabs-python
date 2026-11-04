@@ -151,14 +151,34 @@ def _estimate_counts(
     return int(train_rows or 0), int(features or 1), int(predict_rows or 0)
 
 
-def _estimate_body(call: str, counts: Tuple[int, int, int], preset: Optional[str], task: Optional[str]) -> dict:
+def _estimate_body(
+    call: str, counts: Tuple[int, int, int], preset: Optional[str], task: Optional[str], ranges: bool = False
+) -> dict:
     rows, features, test = counts
     body = {"call": call, "train_rows": rows, "features": features, "preset": preset or "fast"}
     if call == "predict":
         body["rows"] = test
+        if ranges:
+            body["ranges"] = True
     if _tabular.norm_task(task) == "regress":
         body["regression"] = True
     return body
+
+
+def _guess_task(train: Any, target: Optional[str]) -> Optional[str]:
+    """What the server will most likely infer for this target: numbers that are not a handful of whole values -> regression
+    (its per-row ranges are priced in), else classification. None when there is no table to look at.
+    """
+    if train is None or target is None:
+        return None
+    df = _tabular._frame(_pandas(train), "train")
+    if target not in df.columns:
+        return None
+    y = df[target].dropna()
+    if not pd.api.types.is_numeric_dtype(y) or pd.api.types.is_bool_dtype(y):
+        return "classify"
+    whole = bool((y == np.round(y)).all())
+    return "classify" if whole and y.nunique() <= 20 else "regress"
 
 
 def _estimate_result(fit: dict, pred: Optional[dict]) -> Dict[str, Any]:
@@ -1306,6 +1326,7 @@ class Client(_Base):
         features: Optional[int] = None,
         predict_rows: Optional[int] = None,
         task: Optional[str] = None,
+        quantiles: Any = None,
     ) -> Dict[str, Any]:
         """Credits a tabular call will cost, before making it: a fit on `train` plus predicting `test`, priced by the API at
         your organization's rates (POST /v1/estimate). Pass tables, or the counts (train_rows, features, predict_rows).
@@ -1319,14 +1340,18 @@ class Client(_Base):
             features: Feature columns, when no table is passed.
             predict_rows: Rows to predict, when no table is passed.
             preset: "fast" (default: one holdout split, the quickest), "medium" (3-fold bagging, about 3x the time) or "pro" (8-fold bagging, the most accurate; "full" is the same).
-            task: "regress" adds what regression's per-row intervals cost.
+            task: "regress" adds what regression's per-row intervals cost. Default: guessed from the target column, as the
+                API does when predict() gets no task.
+            quantiles: The regression interval levels you will ask predict() for; their cost is added.
         """
         train, test = self._table(train), self._table(test)
         _tabular.check_options(preset, None)
+        task = task or _guess_task(train, target)
+        ranges = quantiles is not None and _tabular.norm_task(task) == "regress"
         counts = _estimate_counts(train, target, test, train_rows, features, predict_rows)
         fit = self._t.request("POST", "/v1/estimate", _estimate_body("fit", counts, preset, task))
         pred = (
-            self._t.request("POST", "/v1/estimate", _estimate_body("predict", counts, preset, task))
+            self._t.request("POST", "/v1/estimate", _estimate_body("predict", counts, preset, task, ranges))
             if counts[2]
             else None
         )
