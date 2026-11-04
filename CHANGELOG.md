@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.2
+
+- Tuning: `yh.tune(df, h, known=..., future=...)` fine-tunes the time-series model on your series (a background job, a few
+  minutes) and returns a `Tuned`: `used` says whether it beat the zero-shot model on your last `h` steps, `holdout` has the
+  numbers, `forecast()` forecasts with it, `delete()` removes it. `forecast(..., tune=t)` (or the id) does the same; a tune
+  that did not win forecasts like the zero-shot model. `background=True`, `get_tune()`, `tunes()`, async versions, and
+  the CLI: `yhatlabs tune data.csv --h 90`, `yhatlabs forecast ... --tune <id>`, `yhatlabs tunes`.
+- `forecast(preset="pro")` (and `--preset pro`): slower and slightly sharper; the default stays `"fast"`.
+- `yhatlabs --version` prints the version (#19).
+- `check()` finds a date column by its values when none is named like one (`Month = 1949-01`), and without any raises a
+  `DataError` that names `time_col=` (it raised a bare `ValueError`). CLI `check --target-col` (#21).
+- `estimate_table()` guesses regression from the target column, as the API does, and takes `quantiles=`, so a regression
+  estimate includes its ranges (#21).
+- A horizon above 2,048 steps says what to do: forecast at a coarser frequency.
+- The `compare` docstring names the default models right: XGBoost, random forest and linear (#20).
+- The skill: default column names, the forecast keeps your id and time column names, preset costs, the horizon limit and
+  resampling very fine data, tuning.
+
 ## 0.2.1
 
 - Large tables run as background jobs. A fit or one-shot predict larger than a direct call takes (the sizes `GET /v1/limits`

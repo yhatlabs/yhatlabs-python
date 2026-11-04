@@ -18,11 +18,16 @@ yhatlabs.check(df, target="churn")  # tables: id-like columns, target leaks, imb
 
 ## Time series (long format: id, timestamp, target, covariates)
 
+Columns are found by name: id `unique_id` / `id` / `item_id` / `series_id`, time `ds` / `timestamp` / `time` / `date` /
+`datetime`, target `y` / `target` / `value` (or the one numeric column). Other names: pass `id_col=`, `time_col=`, `target_col=`.
+
 ```python
 from yhatlabs import Client
 
 yh = Client()
-fc = yh.forecast(df, h=24, level=[80, 95], calendar=True)  # fc.df: id, time, q2.5, q10, median, q90, q97.5
+fc = yh.forecast(
+    df, h=24, level=[80, 95], calendar=True
+)  # fc.df: your id and time columns (same names), then q2.5 ... q97.5
 fc.intervals(95)  # lower_95 / upper_95 next to the median
 fc.prob(above=limit)  # chance of crossing a limit at each step
 fc = yh.forecast(df, h=24, mean=True)  # add the mean when forecasts are summed later
@@ -37,6 +42,12 @@ yh.explain_forecast(
     df, h=24, known=["temp"], future=future
 )  # effect of each covariate on the median; one forecast each
 yh.fill_gaps(df)  # fills missing values inside series
+fc = yh.forecast(df, h=24, preset="pro")  # slower, slightly sharper; default "fast"
+
+# tuning: fine-tune on the user's own series (a few minutes, a background job on our side)
+t = yh.tune(df, h=90, known=["payday"], future=future)  # trains on all but the last 90 steps, scores itself there
+t.used, t.holdout  # used: it beat the zero-shot model on that window; else forecasts with it are zero-shot
+fc = t.forecast(df, known=["payday"], future=future)  # or yh.forecast(df, h=90, tune=t) / tune="tune_..."
 
 from yhatlabs import hierarchy  # series that add up (stores -> regions -> total)
 
@@ -79,6 +90,7 @@ Plots: `from yhatlabs import plots` then `plots.forecast(fc, history=df)`, `plot
 ```
 yhatlabs check data.csv --h 24
 yhatlabs forecast data.csv --h 24 --level 80 -o out.csv
+yhatlabs tune data.csv --h 90                      # prints the tune id; then forecast ... --tune <id>
 yhatlabs evaluate data.csv --h 24 --windows 3
 yhatlabs anomalies data.csv --only
 yhatlabs predict train.csv --target y --test test.csv -o scored.csv
@@ -95,7 +107,12 @@ yhatlabs whoami
 - Report uncertainty with the numbers the result gives (coverage, intervals, novelty), not a single point.
 - Large tables are uploaded once automatically, and a table too large for a direct call runs as a background job that the
   call waits for; nothing else to do.
-- Presets: "fast" (default, seconds), "medium" (about 2-3x slower), "pro" (most accurate, about 4-8x slower than fast).
+- Table presets: start on "fast" (default, seconds); "medium" costs about 3x the credits and takes 2-3x the time, "pro"
+  about 8x the credits and 4-8x the time, for the last bit of accuracy. Forecast presets: "fast" (default) and "pro".
+- Horizon: at most 2,048 steps. Forecast at the resolution decisions are made at: resample very fine data first (5-second
+  data to 1-minute averages); raw high-frequency data forecasts worse and with over-confident intervals.
+- Tuning helps most with known drivers (paydays, promotions) and a few long series; it needs at least 2 x h + 64 values
+  per series and one request's worth of series. Check `t.used` before claiming an improvement.
 - Regression: `prediction` is the point forecast; with quantiles=, `median` and `mean` describe the row's distribution.
   Ranges add a fixed cost and about 10-20 s the first time on a saved model.
 - Predicting from a saved model is charged on the training table's size (0.5 x its cells) plus the predicted cells.

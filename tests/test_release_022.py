@@ -56,12 +56,15 @@ def test_cli_version(capsys):
 
 def test_cli_tune_and_forecast_with_it(tmp_path, capsys, monkeypatch, hourly):
     api = TuneAPI()
-    made = lambda **kw: Client(
-        "test-key",
-        base_url="https://fake.test",
-        limits=Limits(),
-        http_client=httpx.Client(transport=httpx.MockTransport(api)),
-    )  # noqa: E731
+
+    def made(**kw):
+        return Client(
+            "test-key",
+            base_url="https://fake.test",
+            limits=Limits(),
+            http_client=httpx.Client(transport=httpx.MockTransport(api)),
+        )
+
     monkeypatch.setattr(client_mod, "Client", made)
     path = tmp_path / "data.csv"
     hourly.to_csv(path, index=False)
