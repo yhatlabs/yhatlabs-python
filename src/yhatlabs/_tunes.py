@@ -79,7 +79,7 @@ class Tuned:
         return self._c().forecast(data, h or self.horizon, model=self.model, tune=self.id, **kw)
 
     def delete(self) -> None:
-        """Deletes the tune and its adapters on our side."""
+        """Deletes the tune on our side."""
         self._c()._t.request("DELETE", f"/v1/series/tunes/{self.id}")
 
     def info(self) -> Dict[str, Any]:
