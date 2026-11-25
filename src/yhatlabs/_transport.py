@@ -102,7 +102,7 @@ def resolve_api_key(api_key: Optional[str]) -> str:
     if not key:
         raise ConfigurationError(
             "No API key. Pass api_key=... or set the YHAT_API_KEY environment variable. "
-            "Request access at https://yhatlabs.com/models/access."
+            "Create a key at https://yhatlabs.com/models/signup."
         )
     return key
 

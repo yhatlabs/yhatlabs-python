@@ -111,10 +111,11 @@ def _tune_body(
         kw["target_col"],
     )
     prep = _prep(data, h, limits, known=known, past=prep_kw["past"], static=prep_kw["static"], future=future, **kw)
-    if len(batches(prep.items, limits)) > 1:
+    if len(batches(prep.items, limits, h)) > 1:
         raise DataError(
-            f"A tune takes the series of one request: at most {limits.max_series} series and {limits.max_total_points:,} points "
-            "(covariates included). Tune on a representative subset; forecasts with the tune can then cover every series."
+            f"A tune takes the series of one request: at most {limits.max_series} series, {limits.max_total_points:,} points "
+            f"(covariates included) and {limits.max_steps:,} series x horizon steps. Tune on a representative subset; forecasts "
+            "with the tune can then cover every series."
         )
     extra: dict = {"steps": int(steps)}
     if name is not None:
@@ -194,6 +195,12 @@ def _compare_body(body: dict, models: Optional[List[str]]) -> dict:
     if models is not None:
         out["models"] = models
     return out
+
+
+def _reply_size(extra: Optional[dict]) -> Tuple[int, int]:
+    """Quantile levels and sample paths per forecast step that a reply carries (by default the model's native levels)."""
+    e = extra or {}
+    return len(e.get("quantile_levels") or ASSUMED_NATIVE), int(e.get("samples") or 0)
 
 
 def _forecast_extra(limits: Limits, quantiles: Any, samples: Optional[int], seed: Optional[int], history: bool) -> dict:
@@ -615,7 +622,7 @@ class Client(_Base):
         mask: bool = False,
     ):
         """-> (one reply per item, None where its batch failed), the raw replies, and the failures."""
-        bs = batches(items, self.limits)
+        bs = batches(items, self.limits, h, *_reply_size(extra))
 
         def one(b: List[Item]):
             try:
@@ -1830,7 +1837,7 @@ class AsyncClient(_Base):
                         raise
                     return [None] * len(b), None, {"ids": [it.uid for it in b], "error": str(e), "exception": e}
 
-        done = await asyncio.gather(*(one(b) for b in batches(items, self.limits)))
+        done = await asyncio.gather(*(one(b) for b in batches(items, self.limits, h, *_reply_size(extra))))
         return (
             [f for out, _, _ in done for f in out],
             [r for _, r, _ in done if r is not None],

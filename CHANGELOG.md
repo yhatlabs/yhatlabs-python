@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.3
+
+- Large forecasts are split into requests the API accepts. The client now counts what a reply carries (series x horizon,
+  x quantile levels, x sample paths) and how big each request is, as the API does. Before, 256 series at a 1,400-step
+  horizon, a hundred series with `samples=1000`, or long histories with covariates could be refused with a 413 instead
+  of being split. A single series too large for any request raises a `DataError` that names the limit and what to change.
+- `Limits` has the new caps (`max_steps`, `max_values`, `max_sample_values`, `max_bytes`), read from `/v1/limits` where
+  the API lists them.
+- CLI: an input file that doesn't exist, or a file that can't be read or written, is a one-line error instead of a
+  traceback.
+- The missing-key message links to sign-up: https://yhatlabs.com/models/signup.
+
 ## 0.2.2
 
 - Tuning: `yh.tune(df, h, known=..., future=...)` fine-tunes the time-series model on your series (a background job, a few

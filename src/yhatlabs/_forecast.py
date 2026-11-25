@@ -32,6 +32,10 @@ class Limits:
     max_points_per_series: int = 32_768
     max_total_points: int = 2_000_000
     max_horizon: int = 2048
+    max_steps: int = 1_000_000  # forecast steps in one reply: series rows (one per target column) x horizon
+    max_values: int = 3_000_000  # quantiles in one reply: series rows x horizon x quantile levels
+    max_sample_values: int = 2_000_000  # sample-path values in one reply: series rows x horizon x samples
+    max_bytes: int = 32 * 1024 * 1024  # one forecast request's JSON, before compression
     max_tabular_rows: int = 200_000
     max_tabular_bytes: int = 64 * 1024 * 1024
     max_columns: int = 256  # targets per series, and past / known covariates per series (each counted separately)
@@ -61,6 +65,10 @@ class Limits:
             max_points_per_series=f.get("max_points_per_series", d.max_points_per_series),
             max_total_points=f.get("max_total_points", d.max_total_points),
             max_horizon=f.get("max_horizon", d.max_horizon),
+            max_steps=f.get("max_steps", d.max_steps),
+            max_values=f.get("max_values", d.max_values),
+            max_sample_values=f.get("max_sample_values", d.max_sample_values),
+            max_bytes=f.get("max_bytes", d.max_bytes),
             max_tabular_rows=t.get("max_rows", d.max_tabular_rows),
             max_tabular_bytes=t.get("max_bytes", d.max_tabular_bytes),
             max_columns=f.get("max_columns", d.max_columns),
@@ -576,22 +584,44 @@ def prepare(
     return Prepared(items, distinct.pop(), id_col, time_col, targets, warns)
 
 
-def batches(items: List[Item], limits: Limits) -> List[List[Item]]:
-    """Greedy packing so that every request respects the series and total-points caps."""
+BODY_MARGIN = 64 * 1024  # room in max_bytes for the request's other fields (model, horizon, levels, ...)
+
+
+def batches(items: List[Item], limits: Limits, h: int = 0, levels: int = 9, samples: int = 0) -> List[List[Item]]:
+    """Greedy packing so that every request respects the API's caps, counted the way the API counts them: series, points
+    (covariates included), the request's size, and what the reply carries (series rows x horizon, x quantile levels, x
+    sample paths; a row is one target column of a series).
+    """
+    from ._transport import _dumps
+
+    caps = [
+        (limits.max_total_points, "points (with covariates)", "Send fewer points of history."),
+        (limits.max_steps, "series rows x horizon steps", "Use a shorter horizon."),
+        (
+            limits.max_values,
+            "series rows x horizon x quantile levels",
+            "Ask for fewer quantile levels or a shorter horizon.",
+        ),
+        (limits.max_sample_values if samples else None, "sample values", "Ask for fewer samples or a shorter horizon."),
+        (limits.max_bytes - BODY_MARGIN, "bytes of request", "Send fewer points of history."),
+    ]
     out: List[List[Item]] = []
     cur: List[Item] = []
-    pts = 0
+    used = [0] * len(caps)
     for it in items:
-        p = it.points
-        if p > limits.max_total_points:
-            raise DataError(
-                f"Series {it.uid!r} alone has {p} points (with covariates), above the per-request limit {limits.max_total_points}."
-            )
-        if cur and (len(cur) >= limits.max_series or pts + p > limits.max_total_points):
+        rows = len(it.targets)
+        cost = [it.points, rows * h, rows * h * levels, rows * h * samples, len(_dumps(it.payload("s0"))) + 8]
+        for (cap, what, hint), c in zip(caps, cost):
+            if cap is not None and c > cap:
+                raise DataError(
+                    f"Series {it.uid!r} alone needs {c:,} {what}, above the per-request limit {cap:,}. {hint}"
+                )
+        full = any(cap is not None and u + c > cap for (cap, _, _), u, c in zip(caps, used, cost))
+        if cur and (len(cur) >= limits.max_series or full):
             out.append(cur)
-            cur, pts = [], 0
+            cur, used = [], [0] * len(caps)
         cur.append(it)
-        pts += p
+        used = [u + c for u, c in zip(used, cost)]
     if cur:
         out.append(cur)
     return out

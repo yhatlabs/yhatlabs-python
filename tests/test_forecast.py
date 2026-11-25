@@ -113,6 +113,53 @@ def test_batching_reassembles_in_order(api, hourly):
     assert fc.usage["requests"] == 4 and len(fc.request_ids) == 4
 
 
+def _client_with(api, **limits):
+    import httpx
+
+    from yhatlabs import Client
+
+    return Client(
+        "test-key",
+        base_url="https://fake.test",
+        limits=Limits(**limits),
+        max_concurrency=1,
+        http_client=httpx.Client(transport=httpx.MockTransport(api)),
+    )
+
+
+def _sent(api):
+    return [r[2] for r in api.requests if r[1] == "/v1/series/forecast"]
+
+
+def test_batching_respects_the_reply_caps(api, hourly):
+    many = pd.concat([hourly.assign(unique_id=hourly.unique_id + str(i)) for i in range(5)], ignore_index=True)
+    fc = _client_with(api, max_values=2 * 3 * 9).forecast(
+        many, h=3
+    )  # room for two series at h=3 and the 9 native levels
+    assert [len(b["series"]) for b in _sent(api)] == [2] * 5
+    assert fc.df.unique_id.nunique() == 10
+
+    api.requests.clear()
+    fc = _client_with(api, max_sample_values=3 * 4, capabilities={"forecast_samples": True}).forecast(
+        hourly, h=3, samples=4
+    )
+    assert [len(b["series"]) for b in _sent(api)] == [1, 1]  # 3 steps x 4 samples fill a request
+    assert fc.samples is not None and fc.samples["unique_id"].nunique() == 2
+
+
+def test_batching_respects_the_request_size(api, hourly):
+    from yhatlabs._forecast import BODY_MARGIN
+
+    _client_with(api, max_bytes=BODY_MARGIN + 2500).forecast(hourly, h=2)  # one 96-point series is about 1.8 kB of JSON
+    assert [len(b["series"]) for b in _sent(api)] == [1, 1]
+
+
+def test_series_too_big_for_any_request(api, hourly):
+    with pytest.raises(DataError, match="alone needs 27 series rows x horizon x quantile levels"):
+        _client_with(api, max_values=10).forecast(hourly, h=3)
+    assert not _sent(api)
+
+
 def test_truncates_long_series(api):
     import httpx
 
