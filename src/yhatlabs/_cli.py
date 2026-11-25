@@ -299,6 +299,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except YHatError as e:
         print(f"yhatlabs: {e}", file=sys.stderr)
         return 1
+    except OSError as e:  # a file that isn't there or can't be read or written: one line, not a traceback
+        print(f"yhatlabs: {e.strerror or e}: {e.filename}" if e.filename else f"yhatlabs: {e}", file=sys.stderr)
+        return 1
     return 0
 
 

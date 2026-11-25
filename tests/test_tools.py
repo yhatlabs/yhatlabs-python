@@ -138,6 +138,23 @@ def test_progress_silent_without_terminal(capsys, client):
     assert capsys.readouterr().err == ""
 
 
+def test_cli_missing_file_is_one_line(tmp_path, capsys, monkeypatch):
+    from yhatlabs._cli import main
+
+    monkeypatch.setenv("YHAT_API_KEY", "test-key")
+    missing = tmp_path / "nope.csv"
+    assert main(["--base-url", "https://fake.test", "forecast", str(missing), "--h", "3"]) == 1
+    err = capsys.readouterr().err
+    assert err == f"yhatlabs: No such file or directory: {missing}\n"
+
+
+def test_no_key_points_to_signup(monkeypatch):
+    monkeypatch.delenv("YHAT_API_KEY", raising=False)
+    monkeypatch.delenv("YHATLABS_API_KEY", raising=False)
+    with pytest.raises(yhatlabs.ConfigurationError, match="yhatlabs.com/models/signup"):
+        yhatlabs.Client()
+
+
 def test_cli_check_json_skills(tmp_path, capsys, hourly):
     from yhatlabs._cli import main
 
@@ -155,3 +172,6 @@ def test_cli_check_json_skills(tmp_path, capsys, hourly):
 def test_limits_class_from_api():
     lim = Limits.from_api({"forecast": {"max_series": 9}, "tabular": {"max_rows": 7}})
     assert lim.max_series == 9 and lim.max_tabular_rows == 7 and lim.max_horizon == Limits().max_horizon
+    lim = Limits.from_api({"forecast": {"max_steps": 5, "max_values": 6, "max_sample_values": 7, "max_bytes": 8}})
+    assert (lim.max_steps, lim.max_values, lim.max_sample_values, lim.max_bytes) == (5, 6, 7, 8)
+    assert Limits.from_api({}).max_sample_values == 2_000_000  # an API that doesn't publish it: the hosted API's cap
